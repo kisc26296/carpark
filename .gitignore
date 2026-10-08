@@ -39,3 +39,9 @@ yarn-error.log*
 # typescript
 *.tsbuildinfo
 next-env.d.ts
+
+# exe 打包產物（node.exe 執行檔、node_modules 等太大不適合進 git）
+/dist-exe
+/dist-test
+/build-tools
+/release

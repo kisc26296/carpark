@@ -8,8 +8,9 @@ import {
   type CommandSpec,
 } from "@/lib/parking/catalog";
 import { DEFAULT_SN } from "@/lib/parking/protocol";
+import { LED_COLORS, LED_DEFAULT_ADDRESS, type LedColor } from "@/lib/parking/led-protocol-shared";
 
-type Tab = "http" | "uplink" | "downlink" | "records";
+type Tab = "http" | "uplink" | "downlink" | "records" | "devices" | "display";
 type RecordKind = "messages" | "commands" | "devices" | "results";
 
 interface RunResult {
@@ -24,7 +25,7 @@ interface Status {
   broker: string;
   platformConnected: boolean;
   error: string | null;
-  simulators: { sn: string; connected: boolean; state: Record<string, unknown> }[];
+  simulators: { sn: string; connected: boolean; state: Record<string, unknown>; loginPort: number }[];
 }
 
 const TABS: { id: Tab; label: string }[] = [
@@ -32,6 +33,8 @@ const TABS: { id: Tab; label: string }[] = [
   { id: "uplink", label: "MQTT 上行（設備 → Server）" },
   { id: "downlink", label: "MQTT 下行（Server → 設備）" },
   { id: "records", label: "紀錄" },
+  { id: "devices", label: "設備搜尋" },
+  { id: "display", label: "顯示板訊息" },
 ];
 
 const HTTP_KEY = "http:Result";
@@ -274,6 +277,401 @@ function summarize(kind: RecordKind, item: Record<string, unknown>): string {
   }
 }
 
+interface ScanItem {
+  ip: string;
+  hostname: string | null;
+}
+
+interface ScanState {
+  loading: boolean;
+  error: string | null;
+  subnet: string | null;
+  localAddress: string | null;
+  items: ScanItem[];
+  truncated: boolean;
+  ms: number | null;
+}
+
+interface ConnTestResult {
+  ok: boolean;
+  ms: number;
+  message: string;
+  sn?: string;
+  deviceType?: string;
+  firmwareVer?: string;
+}
+
+function DeviceScanPanel({ simulators }: { simulators: Status["simulators"] }) {
+  const [scan, setScan] = useState<ScanState>({
+    loading: false,
+    error: null,
+    subnet: null,
+    localAddress: null,
+    items: [],
+    truncated: false,
+    ms: null,
+  });
+  const [ip, setIp] = useState("");
+  const [port, setPort] = useState("");
+  const [username, setUsername] = useState("admin");
+  const [password, setPassword] = useState("admin");
+  const [testBusy, setTestBusy] = useState(false);
+  const [testResult, setTestResult] = useState<ConnTestResult | null>(null);
+
+  const runScan = async () => {
+    setScan((s) => ({ ...s, loading: true, error: null }));
+    try {
+      const res = await fetch("/api/parking/devices/scan");
+      const json = await res.json();
+      if (!res.ok || !json.ok) throw new Error(json.error ?? "掃描失敗");
+      setScan({
+        loading: false,
+        error: null,
+        subnet: json.subnet,
+        localAddress: json.localAddress,
+        items: json.items,
+        truncated: json.truncated,
+        ms: json.ms,
+      });
+    } catch (e) {
+      setScan((s) => ({ ...s, loading: false, error: e instanceof Error ? e.message : String(e) }));
+    }
+  };
+
+  const runTest = async () => {
+    setTestBusy(true);
+    setTestResult(null);
+    try {
+      const res = await fetch("/api/parking/devices/test-connection", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ ip, port: Number(port), username, password }),
+      });
+      const json = await res.json();
+      setTestResult({
+        ok: json.ok,
+        ms: json.ms ?? 0,
+        message: json.message ?? json.error ?? "",
+        sn: json.sn,
+        deviceType: json.deviceType,
+        firmwareVer: json.firmwareVer,
+      });
+    } catch (e) {
+      setTestResult({ ok: false, ms: 0, message: e instanceof Error ? e.message : String(e) });
+    } finally {
+      setTestBusy(false);
+    }
+  };
+
+  return (
+    <div className="flex flex-col gap-4">
+      {simulators.length > 0 && (
+        <div className="rounded-lg bg-zinc-50 px-3 py-2 text-xs text-zinc-600 dark:bg-zinc-900 dark:text-zinc-400">
+          模擬設備登入測試：IP 填 127.0.0.1，Port 填{" "}
+          {simulators.map((s) => (
+            <code key={s.sn} className="font-mono">
+              {s.loginPort}
+            </code>
+          ))}
+          ，帳號密碼固定 <code className="font-mono">admin / admin</code>。
+        </div>
+      )}
+      <div className="flex flex-col gap-3 rounded-xl border border-zinc-200 bg-white p-4 dark:border-zinc-800 dark:bg-zinc-900">
+        <div className="flex flex-wrap items-center gap-3">
+          <button
+            onClick={runScan}
+            disabled={scan.loading}
+            className="rounded-lg bg-zinc-900 px-3 py-1.5 text-sm font-medium text-white hover:bg-zinc-700 disabled:opacity-50 dark:bg-zinc-100 dark:text-zinc-900"
+          >
+            {scan.loading ? "掃描中…" : "掃描區網設備"}
+          </button>
+          {scan.subnet && (
+            <span className="text-xs text-zinc-500">
+              本機 {scan.localAddress}，網段 {scan.subnet}，耗時 {scan.ms} ms
+            </span>
+          )}
+          {scan.truncated && (
+            <span className="text-xs text-amber-700 dark:text-amber-400">網段過大，已截斷掃描範圍</span>
+          )}
+        </div>
+        {scan.error && <p className="text-sm text-rose-600">{scan.error}</p>}
+        {!scan.loading && scan.subnet && scan.items.length === 0 && (
+          <p className="text-sm text-zinc-500">沒有掃到有回應的設備</p>
+        )}
+        {scan.items.length > 0 && (
+          <div className="flex flex-col gap-1">
+            <p className="text-xs text-zinc-500">共 {scan.items.length} 個回應的 IP，點選可帶入下方連線測試</p>
+            <div className="flex flex-wrap gap-2">
+              {scan.items.map((item) => (
+                <button
+                  key={item.ip}
+                  onClick={() => setIp(item.ip)}
+                  className={`rounded-lg border px-2.5 py-1 font-mono text-xs ${
+                    ip === item.ip
+                      ? "border-zinc-900 bg-zinc-900 text-white dark:border-zinc-100 dark:bg-zinc-100 dark:text-zinc-900"
+                      : "border-zinc-200 bg-zinc-50 hover:bg-zinc-100 dark:border-zinc-700 dark:bg-zinc-950 dark:hover:bg-zinc-800"
+                  }`}
+                >
+                  {item.ip}
+                  {item.hostname && <span className="ml-1 text-zinc-400">{item.hostname}</span>}
+                </button>
+              ))}
+            </div>
+          </div>
+        )}
+      </div>
+
+      <div className="flex flex-col gap-3 rounded-xl border border-zinc-200 bg-white p-4 dark:border-zinc-800 dark:bg-zinc-900">
+        <h2 className="text-sm font-semibold">連線測試（帳號密碼登入取得設備編號）</h2>
+        <p className="text-xs text-zinc-500">
+          ⚠️ 目前還沒有廠商的登入協定文件，這裡先用雛形協定（TCP + NDJSON，{"{"}action:&quot;login&quot;,
+          username,password{"}"} → 設備回傳 sn）讓流程先跑通，細節見 device-login.ts。等拿到正式協定文件後會換成正確格式。
+        </p>
+        <div className="flex flex-wrap items-end gap-3">
+          <label className="flex flex-col gap-1 text-xs text-zinc-600 dark:text-zinc-400">
+            IP
+            <input
+              value={ip}
+              onChange={(e) => setIp(e.target.value.trim())}
+              placeholder="192.168.1.100"
+              className="w-40 rounded-lg border border-zinc-200 bg-zinc-50 px-2 py-1 font-mono text-sm dark:border-zinc-700 dark:bg-zinc-950"
+            />
+          </label>
+          <label className="flex flex-col gap-1 text-xs text-zinc-600 dark:text-zinc-400">
+            Port
+            <input
+              value={port}
+              onChange={(e) => setPort(e.target.value.trim())}
+              placeholder="例如 9201"
+              className="w-24 rounded-lg border border-zinc-200 bg-zinc-50 px-2 py-1 font-mono text-sm dark:border-zinc-700 dark:bg-zinc-950"
+            />
+          </label>
+          <label className="flex flex-col gap-1 text-xs text-zinc-600 dark:text-zinc-400">
+            帳號
+            <input
+              value={username}
+              onChange={(e) => setUsername(e.target.value)}
+              className="w-36 rounded-lg border border-zinc-200 bg-zinc-50 px-2 py-1 text-sm dark:border-zinc-700 dark:bg-zinc-950"
+            />
+          </label>
+          <label className="flex flex-col gap-1 text-xs text-zinc-600 dark:text-zinc-400">
+            密碼
+            <input
+              type="password"
+              value={password}
+              onChange={(e) => setPassword(e.target.value)}
+              className="w-36 rounded-lg border border-zinc-200 bg-zinc-50 px-2 py-1 text-sm dark:border-zinc-700 dark:bg-zinc-950"
+            />
+          </label>
+          <button
+            onClick={runTest}
+            disabled={testBusy || !ip || !port}
+            className="rounded-lg bg-emerald-600 px-3 py-1.5 text-sm font-medium text-white hover:bg-emerald-700 disabled:opacity-50"
+          >
+            {testBusy ? "測試中…" : "測試連線"}
+          </button>
+          {testResult && <StatusBadge ok={testResult.ok}>{testResult.ms} ms</StatusBadge>}
+        </div>
+        {testResult && (
+          <div className="text-sm">
+            <p className={testResult.ok ? "text-emerald-700 dark:text-emerald-400" : "text-rose-600"}>
+              {testResult.message}
+            </p>
+            {testResult.ok && (testResult.deviceType || testResult.firmwareVer) && (
+              <p className="text-xs text-zinc-500">
+                {testResult.deviceType && <>設備類型 {testResult.deviceType} </>}
+                {testResult.firmwareVer && <>韌體版本 {testResult.firmwareVer}</>}
+              </p>
+            )}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+interface DisplayLineResult {
+  line: number;
+  skipped?: boolean;
+  ok?: boolean;
+  overLimit?: boolean;
+  contentBytes?: number;
+  hex?: string;
+  status?: string;
+  error?: string;
+}
+
+function DisplayMessagePanel({ sn }: { sn: string }) {
+  const [lines, setLines] = useState<[string, string, string, string]>(["", "", "", ""]);
+  const [color, setColor] = useState<LedColor>(1);
+  const [mode, setMode] = useState<"fixed" | "temporary">("fixed");
+  const [durationSec, setDurationSec] = useState("10");
+  const [address, setAddress] = useState(String(LED_DEFAULT_ADDRESS));
+  const [busy, setBusy] = useState(false);
+  const [lineResults, setLineResults] = useState<DisplayLineResult[] | null>(null);
+  const [ms, setMs] = useState<number | null>(null);
+  const [requestError, setRequestError] = useState<string | null>(null);
+
+  const setLine = (index: number, value: string) => {
+    setLines((prev) => {
+      const next = [...prev] as [string, string, string, string];
+      next[index] = value;
+      return next;
+    });
+  };
+
+  const send = async () => {
+    setBusy(true);
+    setLineResults(null);
+    setRequestError(null);
+    const start = performance.now();
+    try {
+      const res = await fetch("/api/parking/display-message", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          sn,
+          lines,
+          color,
+          mode,
+          durationSec: mode === "temporary" ? Number(durationSec) || 10 : undefined,
+          address: Number(address) || LED_DEFAULT_ADDRESS,
+        }),
+      });
+      const json = await res.json();
+      if (!res.ok || json.error) {
+        setRequestError(String(json.error ?? res.statusText));
+      } else {
+        setLineResults(json.results as DisplayLineResult[]);
+      }
+    } catch (e) {
+      setRequestError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setMs(Math.round(performance.now() - start));
+      setBusy(false);
+    }
+  };
+
+  const lineStatusLabel = (r: DisplayLineResult) => {
+    if (r.skipped) return "空白，略過";
+    if (r.overLimit) return r.error ?? "內容過長";
+    if (r.error) return r.error;
+    if (r.status === "sent") return "已送出（此命令設備不回覆）";
+    if (r.status === "timeout") return "逾時，設備未回覆";
+    return r.status ?? (r.ok ? "成功" : "失敗");
+  };
+
+  return (
+    <div className="flex flex-col gap-4">
+      <div className="rounded-lg bg-zinc-50 px-3 py-2 text-xs text-zinc-600 dark:bg-zinc-900 dark:text-zinc-400">
+        依《LED点阵显示控制卡使用说明》實作：固定顯示對應 0x25 加載廣告內容指令（掉電保存），臨時訊息對應
+        0x27 下發臨顯內容指令（顯示秒數到了自動恢復廣告內容）。每一行各自組成一個 RS485 命令帧，透過
+        SerialData（4.14）下行命令轉送。文字會先轉成 GBK 編碼（顯示板需要 GBK，不是 UTF-8）。
+      </div>
+
+      <div className="flex flex-col gap-3 rounded-xl border border-zinc-200 bg-white p-4 dark:border-zinc-800 dark:bg-zinc-900">
+        <h2 className="text-sm font-semibold">顯示內容（4 行文字，每行最多 GBK 60 bytes）</h2>
+        <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
+          {lines.map((line, i) => (
+            <input
+              key={i}
+              value={line}
+              onChange={(e) => setLine(i, e.target.value)}
+              placeholder={`第 ${i + 1} 行`}
+              maxLength={60}
+              className="rounded-lg border border-zinc-200 bg-zinc-50 px-2 py-1.5 text-sm dark:border-zinc-700 dark:bg-zinc-950"
+            />
+          ))}
+        </div>
+
+        <div className="flex flex-wrap items-end gap-4">
+          <label className="flex flex-col gap-1 text-xs text-zinc-600 dark:text-zinc-400">
+            文字顏色
+            <select
+              value={color}
+              onChange={(e) => setColor(Number(e.target.value) as LedColor)}
+              className="rounded-lg border border-zinc-200 bg-zinc-50 px-2 py-1.5 text-sm dark:border-zinc-700 dark:bg-zinc-950"
+            >
+              {LED_COLORS.map((c) => (
+                <option key={c.value} value={c.value}>
+                  {c.label}
+                </option>
+              ))}
+            </select>
+          </label>
+
+          <div className="flex flex-col gap-1 text-xs text-zinc-600 dark:text-zinc-400">
+            顯示模式
+            <div className="flex items-center gap-3 py-1.5">
+              <label className="flex items-center gap-1.5 text-sm text-zinc-800 dark:text-zinc-200">
+                <input type="radio" checked={mode === "fixed"} onChange={() => setMode("fixed")} />
+                固定顯示（掉電保存）
+              </label>
+              <label className="flex items-center gap-1.5 text-sm text-zinc-800 dark:text-zinc-200">
+                <input
+                  type="radio"
+                  checked={mode === "temporary"}
+                  onChange={() => setMode("temporary")}
+                />
+                臨時訊息
+              </label>
+            </div>
+          </div>
+
+          {mode === "temporary" && (
+            <label className="flex flex-col gap-1 text-xs text-zinc-600 dark:text-zinc-400">
+              顯示秒數（1-255）
+              <input
+                type="number"
+                min={1}
+                max={255}
+                value={durationSec}
+                onChange={(e) => setDurationSec(e.target.value)}
+                className="w-28 rounded-lg border border-zinc-200 bg-zinc-50 px-2 py-1.5 text-sm dark:border-zinc-700 dark:bg-zinc-950"
+              />
+            </label>
+          )}
+
+          <label className="flex flex-col gap-1 text-xs text-zinc-600 dark:text-zinc-400">
+            RS485 地址
+            <input
+              value={address}
+              onChange={(e) => setAddress(e.target.value)}
+              className="w-24 rounded-lg border border-zinc-200 bg-zinc-50 px-2 py-1.5 font-mono text-sm dark:border-zinc-700 dark:bg-zinc-950"
+            />
+          </label>
+
+          <button
+            onClick={send}
+            disabled={busy || !sn}
+            className="rounded-lg bg-emerald-600 px-3 py-1.5 text-sm font-medium text-white hover:bg-emerald-700 disabled:opacity-50"
+          >
+            {busy ? "送出中…" : "送出到設備"}
+          </button>
+
+          {ms !== null && <span className="text-xs text-zinc-500">{ms} ms</span>}
+        </div>
+
+        {requestError && <p className="text-sm text-rose-600">{requestError}</p>}
+
+        {lineResults && (
+          <div className="flex flex-col gap-1.5">
+            {lineResults.map((r) => (
+              <div key={r.line} className="flex items-center gap-2 text-sm">
+                <StatusBadge ok={r.skipped ? true : !!r.ok}>第 {r.line} 行</StatusBadge>
+                <span className={r.skipped ? "text-zinc-400" : r.ok ? "text-emerald-700 dark:text-emerald-400" : "text-rose-600"}>
+                  {lineStatusLabel(r)}
+                </span>
+                {r.hex && <code className="text-xs text-zinc-400">{r.hex}</code>}
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
 export default function ParkingApiTestPage() {
   const [tab, setTab] = useState<Tab>("downlink");
   const [sn, setSn] = useState(DEFAULT_SN);
@@ -394,7 +792,11 @@ export default function ParkingApiTestPage() {
 
   const cardsFor = (kind: "uplink" | "downlink") => (kind === "uplink" ? UPLINK_COMMANDS : DOWNLINK_COMMANDS);
   const keysFor = (t: Tab) =>
-    t === "http" ? [HTTP_KEY] : t === "records" ? [] : cardsFor(t).map((c) => `${t}:${c.command}`);
+    t === "http"
+      ? [HTTP_KEY]
+      : t === "uplink" || t === "downlink"
+        ? cardsFor(t).map((c) => `${t}:${c.command}`)
+        : [];
   const summary = (t: Tab) => {
     const keys = keysFor(t);
     const done = keys.filter((k) => results[k]);
@@ -471,7 +873,7 @@ export default function ParkingApiTestPage() {
           })}
         </nav>
 
-        {tab !== "records" && (
+        {(tab === "http" || tab === "uplink" || tab === "downlink") && (
           <div className="flex flex-wrap items-center gap-3">
             <button
               onClick={() => runAll(keysFor(tab))}
@@ -544,6 +946,8 @@ export default function ParkingApiTestPage() {
         )}
 
         {tab === "records" && <RecordsPanel sn={sn} />}
+        {tab === "devices" && <DeviceScanPanel simulators={status?.simulators ?? []} />}
+        {tab === "display" && <DisplayMessagePanel sn={sn} />}
       </div>
     </div>
   );

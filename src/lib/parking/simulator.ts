@@ -1,5 +1,6 @@
 import "server-only";
 import { randomUUID } from "node:crypto";
+import net from "node:net";
 import mqtt, { type MqttClient } from "mqtt";
 import { getBrokerUrl } from "./mqtt-platform";
 import {
@@ -22,6 +23,10 @@ type Data = Record<string, unknown>;
 /** 原廠預設加密 key 123456798 的 Base64 */
 const DEFAULT_KEY = "MTIzNDU2Nzk4";
 
+/** 模擬「設備搜尋」帳號密碼登入雛形協定（見 device-login.ts）的測試帳密 */
+const MOCK_LOGIN_USERNAME = "admin";
+const MOCK_LOGIN_PASSWORD = "admin";
+
 interface DeviceState {
   gate: "open" | "closed";
   longOpen: boolean;
@@ -37,6 +42,8 @@ export interface SimulatorInfo {
   sn: string;
   connected: boolean;
   state: DeviceState;
+  /** 模擬「設備搜尋」帳密登入雛形協定監聽的 TCP port；帳密固定 admin/admin */
+  loginPort: number;
 }
 
 class SimulatedDevice {
@@ -52,6 +59,8 @@ class SimulatedDevice {
     imageType: 0,
   };
   private readonly ready: Promise<void>;
+  private readonly loginServer: net.Server;
+  private readonly loginReady: Promise<void>;
 
   constructor(readonly sn: string) {
     this.client = mqtt.connect(getBrokerUrl(), {
@@ -71,10 +80,39 @@ class SimulatedDevice {
       this.onDownlink(payload.toString("utf8")).catch((err) => console.error(`[sim ${sn}] 處理失敗:`, err));
     });
     this.client.on("error", (err) => console.error(`[sim ${sn}] 連線錯誤:`, err.message));
+
+    // 模擬「設備搜尋」的帳密登入雛形協定：NDJSON，{action:"login",username,password} -> {ok,sn,...}
+    this.loginServer = net.createServer((socket) => {
+      let buffer = "";
+      socket.on("data", (chunk) => {
+        buffer += chunk.toString("utf8");
+        const newlineIndex = buffer.indexOf("\n");
+        if (newlineIndex === -1) return;
+        const line = buffer.slice(0, newlineIndex);
+        let req: Record<string, unknown> = {};
+        try {
+          req = JSON.parse(line);
+        } catch {
+          socket.end(JSON.stringify({ ok: false, error: "請求格式錯誤（非 JSON）" }) + "\n");
+          return;
+        }
+        if (req.action === "login" && req.username === MOCK_LOGIN_USERNAME && req.password === MOCK_LOGIN_PASSWORD) {
+          socket.end(JSON.stringify({ ok: true, sn: this.sn, deviceType: "SIMULATOR", firmwareVer: "sim-1.0" }) + "\n");
+        } else {
+          socket.end(JSON.stringify({ ok: false, error: "帳號或密碼錯誤" }) + "\n");
+        }
+      });
+    });
+    this.loginReady = new Promise((resolve) => this.loginServer.listen(0, "0.0.0.0", resolve));
   }
 
-  waitReady() {
-    return this.ready;
+  get loginPort(): number {
+    const addr = this.loginServer.address();
+    return addr && typeof addr === "object" ? addr.port : 0;
+  }
+
+  async waitReady() {
+    await Promise.all([this.ready, this.loginReady]);
   }
 
   async publish(command: string, data: unknown, requestId?: string): Promise<MqttEnvelope> {
@@ -263,10 +301,11 @@ class SimulatedDevice {
 
   async stop() {
     await this.client.endAsync();
+    await new Promise<void>((resolve) => this.loginServer.close(() => resolve()));
   }
 
   info(): SimulatorInfo {
-    return { sn: this.sn, connected: this.client.connected, state: this.state };
+    return { sn: this.sn, connected: this.client.connected, state: this.state, loginPort: this.loginPort };
   }
 }
 

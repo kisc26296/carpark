@@ -6,9 +6,11 @@
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
-    "lint": "eslint"
+    "lint": "eslint",
+    "mqtt-broker": "node scripts/mqtt-broker.js"
   },
   "dependencies": {
+    "iconv-lite": "^0.7.3",
     "mongodb": "^7.7.0",
     "mqtt": "^5.16.0",
     "next": "16.3.8",
@@ -20,6 +22,7 @@
     "@types/node": "^20",
     "@types/react": "^19",
     "@types/react-dom": "^19",
+    "aedes": "^1.2.0",
     "eslint": "^9",
     "eslint-config-next": "16.3.8",
     "tailwindcss": "^4",
