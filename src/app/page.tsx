@@ -1,6 +1,11 @@
 "use client";
 
 import { useState, type ReactNode } from "react";
+import { DatabaseSettings } from "./database-settings";
+import { EntryRecords } from "./entry-records";
+import { GateAndCapacity } from "./gate-capacity";
+import { MonthlySettings } from "./monthly-settings";
+import { RateSettings } from "./rate-settings";
 
 // 停車場管理首頁：左側選單 + 右側設定內容。按鈕功能尚未實作，之後再補。
 
@@ -60,108 +65,6 @@ const MENU: { key: MenuKey; label: string; icon: ReactNode }[] = [
   },
 ];
 
-const WEEKDAYS = ["星期一", "星期二", "星期三", "星期四", "星期五", "星期六", "星期日"];
-
-const RATE_ROWS = [
-  { start: "0000", end: "2400", unit: "30", amount: "20", max: "150" },
-  { start: "", end: "", unit: "", amount: "", max: "" },
-  { start: "", end: "", unit: "", amount: "", max: "" },
-  { start: "", end: "", unit: "", amount: "", max: "" },
-];
-
-const inputClass = "border border-gray-400 px-1 py-0.5";
-const cellInputClass = "w-full border border-gray-400 px-1 py-0.5";
-
-function RateSettings() {
-  return (
-    <form className="space-y-5 text-sm text-gray-900" onSubmit={(e) => e.preventDefault()}>
-      <div>
-        <div className="text-xs text-gray-700">固定費率</div>
-        <div className="mt-2 space-y-3">
-          <Field label="進場緩衝(分):" defaultValue="5" />
-          <Field label="離場結帳緩衝(分):" defaultValue="15" />
-        </div>
-      </div>
-
-      <div className="flex flex-wrap items-center gap-1">
-        停車每 <input defaultValue="30" className={`${inputClass} w-24 sm:w-40`} /> 分鐘，就收費{" "}
-        <input defaultValue="10" className={`${inputClass} w-24 sm:w-40`} /> 元
-      </div>
-
-      <p className="pt-2">若 以下 星期幾未設定值 就以上述收費 若未滿 設定的分鐘 就以 設定的分鐘 計</p>
-
-      <div className="flex flex-wrap gap-x-1">
-        {WEEKDAYS.map((day, i) => (
-          <label key={day} className="flex items-center gap-0.5">
-            <input type="radio" name="weekday" defaultChecked={i === WEEKDAYS.length - 1} />
-            {day}
-          </label>
-        ))}
-      </div>
-
-      <div className="overflow-x-auto">
-        <table className="w-full max-w-4xl table-fixed border-collapse text-sm sm:text-base">
-          <thead>
-            <tr className="text-left">
-              {["開始時間", "結束時間", "單位(分)", "金額(元)", "最高收費"].map((h) => (
-                <th key={h} className="font-medium">
-                  {h}
-                </th>
-              ))}
-            </tr>
-          </thead>
-          <tbody>
-            {RATE_ROWS.map((row, i) => (
-              <tr key={i}>
-                {(["start", "end", "unit", "amount", "max"] as const).map((field) => (
-                  <td key={field} className="p-0">
-                    <input defaultValue={row[field]} className={cellInputClass} />
-                  </td>
-                ))}
-              </tr>
-            ))}
-          </tbody>
-        </table>
-      </div>
-
-      <div className="space-y-1.5">
-        <p>開始時間 結束時間 設定為4位數 從 0000 到 2400 若有一項不是4位數 表示此筆設定不成立</p>
-        <p>單位 金額 若有一項為0 表示此筆設定不成立</p>
-        <p>最高收費 若為0 表示不限制</p>
-      </div>
-
-      <div className="space-y-1.5">
-        <label className="flex items-center gap-0.5">
-          <input type="radio" name="dayStart" />
-          計時從當天00:00算起
-        </label>
-        <p>選此表示 從當天00:00算起 到當天23:59結束 算一天</p>
-      </div>
-
-      <div className="space-y-1.5">
-        <label className="flex items-center gap-0.5">
-          <input type="radio" name="dayStart" defaultChecked />
-          計時從車輛進場算起
-        </label>
-        <p>選此表示 從車輛進場算起 經過24小時 算一天</p>
-      </div>
-
-      <div className="space-y-1.5">
-        <label className="flex flex-wrap items-center gap-1">
-          單日最高收費
-          <input defaultValue="150" className={`${inputClass} w-24 sm:w-40`} />
-        </label>
-        <p>單日最高收費 設為0 表示沒有最高收費 大於0表示一天最多收費設定值 且各自時段所設最高收費無效</p>
-      </div>
-
-      {/* TODO: 確定修改的功能之後再實作 */}
-      <button type="submit" className={buttonClass}>
-        確定修改
-      </button>
-    </form>
-  );
-}
-
 // 標題 + 輸入框一列：手機上下排、電腦左右排，皆靠左對齊
 function Field({ label, defaultValue, type = "text" }: { label: string; defaultValue: string; type?: string }) {
   return (
@@ -174,177 +77,45 @@ function Field({ label, defaultValue, type = "text" }: { label: string; defaultV
 
 const buttonClass = "rounded bg-sky-400 px-4 py-2 text-lg text-white hover:bg-sky-500";
 
-// TODO: 設備設定各按鈕的功能之後再實作
+// TODO: 出入口設備 IP / 帳號的「確定修改」之後再實作；開閘與車位數用 GateAndCapacity（和進場紀錄頁共用）
 function DeviceSettings() {
   return (
-    <form className="space-y-5 text-sm text-gray-900" onSubmit={(e) => e.preventDefault()}>
-      <div>
-        <div className="text-xs text-gray-700">出入口設備</div>
-        <div className="mt-2 space-y-3">
-          <Field label="入口IP:" defaultValue="192.168.1.100" />
-          <Field label="入口PORT:" defaultValue="80" />
-          <Field label="入口登入帳號:" defaultValue="admin" />
-          <Field label="入口登入密碼:" defaultValue="admin" type="password" />
+    <div className="space-y-5">
+      <form className="space-y-5 text-sm text-gray-900" onSubmit={(e) => e.preventDefault()}>
+        <div>
+          <div className="text-xs text-gray-700">出入口設備</div>
+          <div className="mt-2 space-y-3">
+            <Field label="入口IP:" defaultValue="192.168.1.100" />
+            <Field label="入口PORT:" defaultValue="80" />
+            <Field label="入口登入帳號:" defaultValue="admin" />
+            <Field label="入口登入密碼:" defaultValue="admin" type="password" />
+          </div>
         </div>
-      </div>
 
-      <hr className="border-gray-200" />
+        <hr className="border-gray-200" />
 
-      <div className="space-y-3">
-        <Field label="出口IP:" defaultValue="192.168.1.101" />
-        <Field label="出口PORT:" defaultValue="80" />
-        <Field label="出口登入帳號:" defaultValue="admin" />
-        <Field label="出口登入密碼:" defaultValue="admin" type="password" />
-      </div>
+        <div className="space-y-3">
+          <Field label="出口IP:" defaultValue="192.168.1.101" />
+          <Field label="出口PORT:" defaultValue="80" />
+          <Field label="出口登入帳號:" defaultValue="admin" />
+          <Field label="出口登入密碼:" defaultValue="admin" type="password" />
+        </div>
 
-      <hr className="border-gray-200" />
-      <button type="submit" className={buttonClass}>
-        確定修改
-      </button>
-
-      <hr className="border-gray-200" />
-      <div className="flex flex-wrap gap-1">
-        <button type="button" className={buttonClass}>
-          出口開閘
+        <hr className="border-gray-200" />
+        <button type="submit" className={buttonClass}>
+          確定修改
         </button>
-        <button type="button" className={buttonClass}>
-          進口開閘
-        </button>
-      </div>
+      </form>
 
+      {/* 開閘與車位數有自己的表單，放在上面的 form 外面（form 不能巢狀） */}
       <hr className="border-gray-200" />
-      <div className="space-y-3">
-        <Field label="最大車位數:" defaultValue="20" />
-        <Field label="剩餘車位數:" defaultValue="8" />
-      </div>
-
-      <hr className="border-gray-200" />
-      <button type="button" className={buttonClass}>
-        車位確定修改
-      </button>
-    </form>
-  );
-}
-
-// 範例資料，之後改由資料庫讀取
-const ENTRY_RECORDS = [
-  { id: 19833, entryTime: "2026/10/01 06:31:26", plate: "BZP8918" },
-  { id: 19953, entryTime: "2026/10/04 18:30:45", plate: "BHJ1568" },
-  { id: 20029, entryTime: "2026/10/08 08:48:43", plate: "CEM7805" },
-  { id: 20041, entryTime: "2026/10/08 18:12:31", plate: "AVV6106" },
-  { id: 20042, entryTime: "2026/10/08 18:13:32", plate: "BDY6259" },
-  { id: 20043, entryTime: "2026/10/08 18:23:08", plate: "CAB5672" },
-  { id: 20046, entryTime: "2026/10/08 19:19:35", plate: "RFU1982" },
-  { id: 20047, entryTime: "2026/10/08 20:13:19", plate: "BWG7652" },
-  { id: 20048, entryTime: "2026/10/08 21:15:33", plate: "ADC8296" },
-  { id: 20049, entryTime: "2026/10/08 22:37:03", plate: "BZB7310" },
-].map((r) => ({ ...r, payTime: "", invoiceNo: "", amount: "" }));
-
-const grayButtonClass = "rounded border border-gray-300 bg-gray-100 px-3 py-1.5 text-sm hover:bg-gray-200";
-const smallButtonClass = "whitespace-nowrap rounded border border-gray-300 bg-white px-3 py-1 text-sm hover:bg-gray-100";
-
-// TODO: 查詢、新增、修改、設定已出場、刪除的功能之後再實作
-function EntryRecords() {
-  return (
-    <div className="space-y-4 text-sm text-gray-900">
-      <div>
-        <div className="text-xs text-gray-700">車輛進場紀錄</div>
-        <form className="mt-1 flex" onSubmit={(e) => e.preventDefault()}>
-          <span className="flex items-center rounded-l border border-gray-300 bg-gray-100 px-3">車牌</span>
-          <input placeholder="車牌" className="min-w-0 flex-1 border-y border-gray-300 px-3 py-1.5" />
-          <button type="submit" className="whitespace-nowrap rounded-r border border-gray-300 bg-gray-100 px-3 hover:bg-gray-200">
-            場內車輛查詢
-          </button>
-        </form>
-      </div>
-
-      <hr className="border-gray-200" />
-      <button type="button" className={grayButtonClass}>
-        手動新增場內車輛
-      </button>
-      <hr className="border-gray-200" />
-
-      {/* 手機、平板：卡片清單 */}
-      <ul className="space-y-2 lg:hidden">
-        {ENTRY_RECORDS.map((r) => (
-          <li key={r.id} className="rounded border border-gray-200 p-3">
-            <div className="flex items-center justify-between gap-2">
-              <div className="flex items-center gap-2 text-base font-medium">
-                {r.plate}
-                <button type="button" className={smallButtonClass}>
-                  修改
-                </button>
-              </div>
-              <span className="text-xs text-gray-500">#{r.id}</span>
-            </div>
-            <dl className="mt-2 grid grid-cols-[5rem_1fr] gap-y-0.5">
-              <dt className="text-gray-500">入場時間</dt>
-              <dd>{r.entryTime}</dd>
-              <dt className="text-gray-500">繳費時間</dt>
-              <dd>{r.payTime || "-"}</dd>
-              <dt className="text-gray-500">發票號碼</dt>
-              <dd>{r.invoiceNo || "-"}</dd>
-              <dt className="text-gray-500">金額</dt>
-              <dd>{r.amount || "-"}</dd>
-            </dl>
-            <div className="mt-2 flex gap-2">
-              <button type="button" className={smallButtonClass}>
-                設定已出場
-              </button>
-              <button type="button" className={smallButtonClass}>
-                刪除
-              </button>
-            </div>
-          </li>
-        ))}
-      </ul>
-
-      {/* 電腦：表格；視窗偏窄時在框內左右捲動，不撐破頁面 */}
-      <div className="hidden overflow-x-auto lg:block">
-        <table className="w-full min-w-[860px] border-collapse border border-gray-200 text-base">
-          <thead>
-            <tr className="bg-[#e8c35f] text-left">
-              {["編號", "入場時間", "繳費時間", "發票號碼", "金額", "車牌", "出場", "刪除"].map((h) => (
-                <th key={h} className="border border-gray-200 px-1.5 py-1 font-medium">
-                  {h}
-                </th>
-              ))}
-            </tr>
-          </thead>
-          <tbody>
-            {ENTRY_RECORDS.map((r) => (
-              <tr key={r.id}>
-                <td className="border border-gray-200 px-1.5 py-1">{r.id}</td>
-                <td className="border border-gray-200 px-1.5 py-1 whitespace-nowrap">{r.entryTime}</td>
-                <td className="border border-gray-200 px-1.5 py-1">{r.payTime}</td>
-                <td className="border border-gray-200 px-1.5 py-1">{r.invoiceNo}</td>
-                <td className="border border-gray-200 px-1.5 py-1">{r.amount}</td>
-                <td className="border border-gray-200 px-1.5 py-1">
-                  <div className="flex items-center gap-2">
-                    {r.plate}
-                    <button type="button" className={smallButtonClass}>
-                      修改
-                    </button>
-                  </div>
-                </td>
-                <td className="border border-gray-200 px-1.5 py-1">
-                  <button type="button" className={smallButtonClass}>
-                    設定已出場
-                  </button>
-                </td>
-                <td className="border border-gray-200 px-1.5 py-1">
-                  <button type="button" className={smallButtonClass}>
-                    刪除
-                  </button>
-                </td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-      </div>
+      <GateAndCapacity />
     </div>
   );
 }
+
+const grayButtonClass = "rounded border border-gray-300 bg-gray-100 px-3 py-1.5 text-sm hover:bg-gray-200";
+const smallButtonClass = "whitespace-nowrap rounded border border-gray-300 bg-white px-3 py-1 text-sm hover:bg-gray-100";
 
 // 範例數字，之後改由資料庫統計
 const SHIFT_SUMMARY_LEFT: [string, number][] = [
@@ -715,12 +486,16 @@ export default function Home() {
       </aside>
 
       <main className="min-w-0 flex-1">
-        {active === "rate" ? (
+        {active === "database" ? (
+          <DatabaseSettings />
+        ) : active === "rate" ? (
           <RateSettings />
         ) : active === "device" ? (
           <DeviceSettings />
         ) : active === "entry" ? (
           <EntryRecords />
+        ) : active === "monthly" ? (
+          <MonthlySettings />
         ) : active === "shift" ? (
           <ShiftHandover />
         ) : (

@@ -111,6 +111,25 @@ async function logMessage(
   });
 }
 
+/**
+ * 設備實際使用的 topic 不一定是預設的 upload/download/{sn}：有些設備在自己的平台設定裡
+ * 把發布/訂閱主題改成帶自訂前綴（例如 upload/Exit_{sn}、download/Exit_{sn}）。
+ * 這裡用設備上一次上行訊息實際使用的 topic 反推對應的下行 topic，查不到才退回預設值。
+ */
+function downlinkTopicFromUplink(uplinkTopic: string): string | null {
+  if (!uplinkTopic.startsWith("upload/")) return null;
+  return `download/${uplinkTopic.slice("upload/".length)}`;
+}
+
+async function resolveDownlinkTopic(sn: string): Promise<string> {
+  const db = await getParkingDb();
+  const device = await db
+    .collection(COLLECTIONS.devices)
+    .findOne<{ uplinkTopic?: string }>({ sn }, { projection: { uplinkTopic: 1 } });
+  const derived = device?.uplinkTopic ? downlinkTopicFromUplink(device.uplinkTopic) : null;
+  return derived ?? downloadTopic(sn);
+}
+
 /** 發佈下行封包並寫入紀錄；需要回覆的命令會登記為 pending */
 async function publishDownlink(
   state: PlatformState,
@@ -118,7 +137,7 @@ async function publishDownlink(
   origin: "manual" | "auto-reply",
 ): Promise<void> {
   await waitConnected(state);
-  const topic = downloadTopic(envelope.sn);
+  const topic = await resolveDownlinkTopic(envelope.sn);
   const expectsReply = !NO_REPLY_COMMANDS.has(envelope.command);
   const dataObject = envelope.data ? (JSON.parse(envelope.data) as Data) : null;
 
@@ -250,8 +269,8 @@ async function handleUplink(state: PlatformState, topic: string, raw: string) {
     state.waiters.get(waiterKey(sn, envelope.requestId))?.({ envelope, dataObject });
   }
 
-  // 2. 更新設備狀態
-  const deviceSet: Data = { lastSeenAt: new Date(), online: true, lastCommand: envelope.command };
+  // 2. 更新設備狀態（含實際收到訊息的 topic，供下行命令反推正確的 download topic）
+  const deviceSet: Data = { lastSeenAt: new Date(), online: true, lastCommand: envelope.command, uplinkTopic: topic };
   if (envelope.command === "Conn" && dataObject?.devInfo) {
     deviceSet.devInfo = parseDevInfo(String(dataObject.devInfo));
     deviceSet.lastConnAt = new Date();

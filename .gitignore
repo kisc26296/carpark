@@ -45,3 +45,12 @@ next-env.d.ts
 /dist-test
 /build-tools
 /release
+
+# transfer zip
+*.zip
+
+# 本機辨識圖片儲存資料夾設定（因人/因機器而異，不適合進 git）
+/.parking-capture-settings.json
+
+# 攝影機辨識照片（含車牌，屬個人資料；倉庫是公開的，不可上傳）
+/jpg/

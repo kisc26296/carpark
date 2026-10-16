@@ -7,5 +7,16 @@ export async function register() {
     } catch (error) {
       console.error("[mqtt] 啟動失敗:", error instanceof Error ? error.message : error);
     }
+
+    // 現金設備依上次的設定自動連回 COM port；開不起來會在背景每 5 秒重試
+    try {
+      const { getAllConfigs } = await import("@/lib/cash-device/config-store");
+      const { openDevice } = await import("@/lib/cash-device/serial-manager");
+      for (const config of await getAllConfigs()) {
+        if (config.autoConnect && config.port) await openDevice(config.device, config, { retry: true });
+      }
+    } catch (error) {
+      console.error("[cash-device] 自動連線失敗:", error instanceof Error ? error.message : error);
+    }
   }
 }

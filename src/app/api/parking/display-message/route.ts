@@ -2,13 +2,15 @@ import { encodeLineMessage } from "@/lib/parking/led-protocol";
 import { sendCommand } from "@/lib/parking/mqtt-platform";
 
 // 下發 LED 點陣顯示板訊息（透過 SerialData 轉送 RS485 位元組）
-// body: { sn, address?, lines: string[4], color: 1|2|3, mode: "fixed"|"temporary", durationSec?, timeoutMs? }
-// 每一行各自組成一個獨立的 RS485 命令帧（0x25 固定顯示 / 0x27 臨時訊息），依序下發。
+// body: { sn, address?, lines: string[4], colors?: (1|2|3)[4], color?: 1|2|3, mode: "fixed"|"temporary", durationSec?, timeoutMs? }
+// 每一行各自組成一個獨立的 RS485 命令帧（0x25 固定顯示 / 0x27 臨時訊息），依序下發，每行可各自指定顏色。
+// colors 省略時，缺的行退回 color（整體預設色，未給則紅）。
 export async function POST(request: Request) {
   let body: {
     sn?: unknown;
     address?: unknown;
     lines?: unknown;
+    colors?: unknown;
     color?: unknown;
     mode?: unknown;
     durationSec?: unknown;
@@ -26,9 +28,11 @@ export async function POST(request: Request) {
   const rawLines = Array.isArray(body.lines) ? body.lines.map((l) => String(l ?? "")) : [];
   const lines = [0, 1, 2, 3].map((i) => rawLines[i] ?? "");
 
-  const color = ([1, 2, 3] as const).includes(Number(body.color) as 1 | 2 | 3)
-    ? (Number(body.color) as 1 | 2 | 3)
-    : 1;
+  const toColor = (v: unknown): 1 | 2 | 3 =>
+    ([1, 2, 3] as const).includes(Number(v) as 1 | 2 | 3) ? (Number(v) as 1 | 2 | 3) : 1;
+  const fallbackColor = toColor(body.color);
+  const rawColors = Array.isArray(body.colors) ? body.colors : [];
+  const colors = [0, 1, 2, 3].map((i) => (rawColors[i] !== undefined ? toColor(rawColors[i]) : fallbackColor));
   const mode = body.mode === "temporary" ? "temporary" : "fixed";
   const durationSec = mode === "temporary" ? Math.min(255, Math.max(1, Number(body.durationSec) || 10)) : undefined;
   const address = Number.isFinite(Number(body.address)) && body.address !== undefined ? Number(body.address) : undefined;
@@ -45,7 +49,7 @@ export async function POST(request: Request) {
       continue;
     }
 
-    const encoded = encodeLineMessage({ line, text, color, durationSec, address });
+    const encoded = encodeLineMessage({ line, text, color: colors[i], durationSec, address });
 
     if (encoded.overLimit) {
       results.push({

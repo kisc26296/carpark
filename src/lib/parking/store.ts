@@ -11,6 +11,14 @@ export const COLLECTIONS = {
   devices: "devices",
   /** 車牌辨識結果（HTTP 與 MQTT），以 guid 去重 */
   plateResults: "plate_results",
+  /** 月租客戶，編號不可重複 */
+  monthlyRentals: "monthly_rentals",
+  /** 車輛進出場紀錄，入口攝影機辨識自動建立、出口攝影機辨識自動出場 */
+  parkingEntries: "parking_entries",
+  /** 流水編號計數器，_id 為使用編號的 collection 名稱 */
+  counters: "counters",
+  /** 系統設定（辨識照片資料夾等），一種設定一筆，_id 為設定名稱 */
+  systemSettings: "system_settings",
 } as const;
 
 export type CommandStatus = "pending" | "success" | "failed" | "timeout" | "sent";
@@ -31,6 +39,11 @@ async function ensureIndexes(db: Db): Promise<void> {
       .collection(COLLECTIONS.plateResults)
       .createIndex({ guid: 1 }, { unique: true, partialFilterExpression: { guid: { $type: "string" } } }),
     db.collection(COLLECTIONS.plateResults).createIndex({ created_at: -1 }),
+    db.collection(COLLECTIONS.monthlyRentals).createIndex({ no: 1 }, { unique: true }),
+    db.collection(COLLECTIONS.monthlyRentals).createIndex({ plates: 1 }),
+    db.collection(COLLECTIONS.parkingEntries).createIndex({ no: 1 }, { unique: true }),
+    db.collection(COLLECTIONS.parkingEntries).createIndex({ plate: 1, exited: 1, entryTime: -1 }),
+    db.collection(COLLECTIONS.parkingEntries).createIndex({ entryTime: -1 }),
   ]);
 }
 

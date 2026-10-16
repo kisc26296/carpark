@@ -10,7 +10,7 @@ import {
 import { DEFAULT_SN } from "@/lib/parking/protocol";
 import { LED_COLORS, LED_DEFAULT_ADDRESS, type LedColor } from "@/lib/parking/led-protocol-shared";
 
-type Tab = "http" | "uplink" | "downlink" | "records" | "devices" | "display";
+type Tab = "http" | "uplink" | "downlink" | "records" | "devices" | "display" | "monitor";
 type RecordKind = "messages" | "commands" | "devices" | "results";
 
 interface RunResult {
@@ -21,12 +21,41 @@ interface RunResult {
   ms: number;
 }
 
+interface DeviceSummary {
+  sn: string;
+  ip: string | null;
+  online: boolean;
+  deviceType: string | null;
+  lastSeenAt: string | null;
+}
+
 interface Status {
   broker: string;
   platformConnected: boolean;
   error: string | null;
   simulators: { sn: string; connected: boolean; state: Record<string, unknown>; loginPort: number }[];
+  devices: DeviceSummary[];
 }
+
+interface PlateResultEvent {
+  id: string;
+  source: "mqtt" | "http";
+  command: string;
+  device_sn: string;
+  plate_raw: string;
+  plate_color: unknown;
+  confidence: number | null;
+  is_car_exist: string | null;
+  valid_plate: string | null;
+  trigger_time: string;
+  image_base64: string | null;
+  image_saved_path: string | null;
+  created_at: string;
+}
+
+/** 有實際偵測到車輛/辨識出車牌，才算「辨識成功」；car-free 的心跳式結果不算 */
+const isSuccessfulRecognition = (e: PlateResultEvent) =>
+  e.is_car_exist !== "car-free" && !!e.plate_raw && e.plate_raw !== "Unlicensed";
 
 const TABS: { id: Tab; label: string }[] = [
   { id: "http", label: "HTTP" },
@@ -35,6 +64,7 @@ const TABS: { id: Tab; label: string }[] = [
   { id: "records", label: "紀錄" },
   { id: "devices", label: "設備搜尋" },
   { id: "display", label: "顯示板訊息" },
+  { id: "monitor", label: "即時監測" },
 ];
 
 const HTTP_KEY = "http:Result";
@@ -80,6 +110,7 @@ function CommandCard({
   onReset,
   busy,
   result,
+  quickActions,
 }: {
   spec: CommandSpec;
   text: string;
@@ -88,6 +119,7 @@ function CommandCard({
   onReset: () => void;
   busy: boolean;
   result?: RunResult;
+  quickActions?: { label: string; tone: "on" | "off"; onClick: () => void }[];
 }) {
   return (
     <div className="flex flex-col gap-3 rounded-xl border border-zinc-200 bg-white p-4 dark:border-zinc-800 dark:bg-zinc-900">
@@ -132,6 +164,20 @@ function CommandCard({
         >
           還原範例
         </button>
+        {quickActions?.map((a) => (
+          <button
+            key={a.label}
+            onClick={a.onClick}
+            disabled={busy}
+            className={`rounded-lg px-3 py-1.5 text-sm font-medium disabled:opacity-50 ${
+              a.tone === "on"
+                ? "bg-emerald-600 text-white hover:bg-emerald-700"
+                : "bg-rose-600 text-white hover:bg-rose-700"
+            }`}
+          >
+            {a.label}
+          </button>
+        ))}
         {result && <span className="ml-auto text-xs text-zinc-500">{result.ms} ms</span>}
       </div>
 
@@ -490,6 +536,217 @@ function DeviceScanPanel({ simulators }: { simulators: Status["simulators"] }) {
   );
 }
 
+interface CaptureBrowseEntry {
+  name: string;
+  path: string;
+}
+
+interface CaptureSettingsState {
+  dir: string | null;
+  exists: boolean;
+  loaded: boolean;
+}
+
+function CaptureSettingsPanel() {
+  const [settings, setSettings] = useState<CaptureSettingsState>({ dir: null, exists: false, loaded: false });
+  const [inputDir, setInputDir] = useState("");
+  const [saving, setSaving] = useState(false);
+  const [message, setMessage] = useState<string | null>(null);
+
+  const [browsing, setBrowsing] = useState(false);
+  const [browsePath, setBrowsePath] = useState<string | null>(null);
+  const [browseParent, setBrowseParent] = useState<string | null>(null);
+  const [browseEntries, setBrowseEntries] = useState<CaptureBrowseEntry[]>([]);
+  const [browseError, setBrowseError] = useState<string | null>(null);
+  const [browseLoading, setBrowseLoading] = useState(false);
+
+  const fetchSettings = useCallback(async (): Promise<CaptureSettingsState> => {
+    try {
+      const res = await fetch("/api/parking/capture-settings");
+      const json = await res.json();
+      return { dir: json.dir ?? null, exists: !!json.exists, loaded: true };
+    } catch {
+      return { dir: null, exists: false, loaded: true };
+    }
+  }, []);
+
+  const loadSettings = useCallback(async () => {
+    const next = await fetchSettings();
+    setSettings(next);
+    setInputDir(next.dir ?? "");
+  }, [fetchSettings]);
+
+  useEffect(() => {
+    let cancelled = false;
+    fetchSettings().then((next) => {
+      if (cancelled) return;
+      setSettings(next);
+      setInputDir(next.dir ?? "");
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [fetchSettings]);
+
+  const applyDir = async (dir: string) => {
+    if (!dir.trim()) return;
+    setSaving(true);
+    setMessage(null);
+    try {
+      const res = await fetch("/api/parking/capture-settings", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ dir }),
+      });
+      const json = await res.json();
+      if (!json.ok) {
+        setMessage(json.error ?? "設定失敗");
+      } else {
+        setMessage(null);
+        setBrowsing(false);
+        await loadSettings();
+      }
+    } catch (e) {
+      setMessage(e instanceof Error ? e.message : String(e));
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const clearDir = async () => {
+    setSaving(true);
+    try {
+      await fetch("/api/parking/capture-settings", { method: "DELETE" });
+      await loadSettings();
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const loadBrowse = async (p: string | null) => {
+    setBrowseLoading(true);
+    setBrowseError(null);
+    try {
+      const url = p ? `/api/parking/capture-settings/browse?path=${encodeURIComponent(p)}` : "/api/parking/capture-settings/browse";
+      const res = await fetch(url);
+      const json = await res.json();
+      if (!res.ok || json.error) {
+        setBrowseError(json.error ?? "讀取失敗");
+        return;
+      }
+      setBrowsePath(json.path);
+      setBrowseParent(json.parent);
+      setBrowseEntries(json.entries ?? []);
+    } catch (e) {
+      setBrowseError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBrowseLoading(false);
+    }
+  };
+
+  const openBrowser = () => {
+    setBrowsing(true);
+    loadBrowse(settings.dir ?? null);
+  };
+
+  return (
+    <div className="flex flex-col gap-2 rounded-xl border border-zinc-200 bg-white p-3 dark:border-zinc-800 dark:bg-zinc-900">
+      <div className="flex flex-wrap items-center gap-2">
+        <span className="text-sm font-medium">辨識圖片儲存資料夾</span>
+        <input
+          value={inputDir}
+          onChange={(e) => setInputDir(e.target.value)}
+          placeholder="例如 D:\parking-captures"
+          className="w-80 flex-1 rounded-lg border border-zinc-200 bg-zinc-50 px-2 py-1 font-mono text-xs dark:border-zinc-700 dark:bg-zinc-950"
+        />
+        <button
+          onClick={() => applyDir(inputDir)}
+          disabled={saving || !inputDir.trim()}
+          className="rounded-lg bg-zinc-900 px-3 py-1.5 text-sm font-medium text-white hover:bg-zinc-700 disabled:opacity-50 dark:bg-zinc-100 dark:text-zinc-900"
+        >
+          儲存
+        </button>
+        <button
+          onClick={openBrowser}
+          disabled={saving}
+          className="rounded-lg px-3 py-1.5 text-sm text-zinc-600 hover:bg-zinc-100 disabled:opacity-50 dark:text-zinc-400 dark:hover:bg-zinc-800"
+        >
+          瀏覽…
+        </button>
+        {settings.loaded && (
+          <StatusBadge ok={!!settings.dir && settings.exists}>
+            {settings.dir ? (settings.exists ? "已設定" : "資料夾不存在") : "尚未設定，辨識圖片不會存檔"}
+          </StatusBadge>
+        )}
+        {settings.dir && (
+          <button
+            onClick={clearDir}
+            disabled={saving}
+            className="text-sm text-rose-600 hover:underline disabled:opacity-50"
+          >
+            清除
+          </button>
+        )}
+      </div>
+      {message && <p className="text-sm text-rose-600">{message}</p>}
+      <p className="text-xs text-zinc-500">
+        每筆車牌辨識結果（MQTT Result / HTTP 辨識結果）如果帶有圖片，會自動存一張到這個資料夾，檔名為「時間_車號.jpg」。
+      </p>
+
+      {browsing && (
+        <div className="flex flex-col gap-2 rounded-lg border border-zinc-200 bg-zinc-50 p-2 dark:border-zinc-700 dark:bg-zinc-950">
+          <div className="flex flex-wrap items-center gap-2">
+            <code className="text-xs text-zinc-600 dark:text-zinc-400">{browsePath ?? "選擇磁碟機"}</code>
+            <div className="ml-auto flex gap-2">
+              {browseParent && (
+                <button
+                  onClick={() => loadBrowse(browseParent)}
+                  className="rounded-lg px-2 py-1 text-xs text-zinc-600 hover:bg-zinc-100 dark:text-zinc-400 dark:hover:bg-zinc-800"
+                >
+                  ⬆ 上一層
+                </button>
+              )}
+              {browsePath && (
+                <button
+                  onClick={() => applyDir(browsePath)}
+                  disabled={saving}
+                  className="rounded-lg bg-emerald-600 px-2 py-1 text-xs font-medium text-white hover:bg-emerald-700 disabled:opacity-50"
+                >
+                  使用此資料夾
+                </button>
+              )}
+              <button
+                onClick={() => setBrowsing(false)}
+                className="rounded-lg px-2 py-1 text-xs text-zinc-600 hover:bg-zinc-100 dark:text-zinc-400 dark:hover:bg-zinc-800"
+              >
+                關閉
+              </button>
+            </div>
+          </div>
+          {browseError && <p className="text-xs text-rose-600">{browseError}</p>}
+          {browseLoading ? (
+            <p className="text-xs text-zinc-500">載入中…</p>
+          ) : browseEntries.length === 0 ? (
+            <p className="text-xs text-zinc-500">（沒有子資料夾）</p>
+          ) : (
+            <div className="flex max-h-48 flex-col gap-0.5 overflow-auto">
+              {browseEntries.map((entry) => (
+                <button
+                  key={entry.path}
+                  onClick={() => loadBrowse(entry.path)}
+                  className="rounded px-2 py-1 text-left text-xs hover:bg-zinc-100 dark:hover:bg-zinc-800"
+                >
+                  📁 {entry.name}
+                </button>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
 interface DisplayLineResult {
   line: number;
   skipped?: boolean;
@@ -503,7 +760,7 @@ interface DisplayLineResult {
 
 function DisplayMessagePanel({ sn }: { sn: string }) {
   const [lines, setLines] = useState<[string, string, string, string]>(["", "", "", ""]);
-  const [color, setColor] = useState<LedColor>(1);
+  const [colors, setColors] = useState<[LedColor, LedColor, LedColor, LedColor]>([1, 1, 1, 1]);
   const [mode, setMode] = useState<"fixed" | "temporary">("fixed");
   const [durationSec, setDurationSec] = useState("10");
   const [address, setAddress] = useState(String(LED_DEFAULT_ADDRESS));
@@ -515,6 +772,14 @@ function DisplayMessagePanel({ sn }: { sn: string }) {
   const setLine = (index: number, value: string) => {
     setLines((prev) => {
       const next = [...prev] as [string, string, string, string];
+      next[index] = value;
+      return next;
+    });
+  };
+
+  const setLineColor = (index: number, value: LedColor) => {
+    setColors((prev) => {
+      const next = [...prev] as [LedColor, LedColor, LedColor, LedColor];
       next[index] = value;
       return next;
     });
@@ -532,7 +797,7 @@ function DisplayMessagePanel({ sn }: { sn: string }) {
         body: JSON.stringify({
           sn,
           lines,
-          color,
+          colors,
           mode,
           durationSec: mode === "temporary" ? Number(durationSec) || 10 : undefined,
           address: Number(address) || LED_DEFAULT_ADDRESS,
@@ -570,36 +835,36 @@ function DisplayMessagePanel({ sn }: { sn: string }) {
       </div>
 
       <div className="flex flex-col gap-3 rounded-xl border border-zinc-200 bg-white p-4 dark:border-zinc-800 dark:bg-zinc-900">
-        <h2 className="text-sm font-semibold">顯示內容（4 行文字，每行最多 GBK 60 bytes）</h2>
-        <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
+        <h2 className="text-sm font-semibold">顯示內容（4 行文字，每行最多 GBK 60 bytes，各行可分別選色）</h2>
+        <div className="flex flex-col gap-2">
           {lines.map((line, i) => (
-            <input
-              key={i}
-              value={line}
-              onChange={(e) => setLine(i, e.target.value)}
-              placeholder={`第 ${i + 1} 行`}
-              maxLength={60}
-              className="rounded-lg border border-zinc-200 bg-zinc-50 px-2 py-1.5 text-sm dark:border-zinc-700 dark:bg-zinc-950"
-            />
+            <div key={i} className="flex items-center gap-2">
+              <span className="w-14 shrink-0 text-xs font-medium text-zinc-500 dark:text-zinc-400">
+                第 {i + 1} 行
+              </span>
+              <input
+                value={line}
+                onChange={(e) => setLine(i, e.target.value)}
+                placeholder={`第 ${i + 1} 行內容`}
+                maxLength={60}
+                className="flex-1 rounded-lg border border-zinc-200 bg-zinc-50 px-2 py-1.5 text-sm dark:border-zinc-700 dark:bg-zinc-950"
+              />
+              <select
+                value={colors[i]}
+                onChange={(e) => setLineColor(i, Number(e.target.value) as LedColor)}
+                className="w-20 rounded-lg border border-zinc-200 bg-zinc-50 px-2 py-1.5 text-sm dark:border-zinc-700 dark:bg-zinc-950"
+              >
+                {LED_COLORS.map((c) => (
+                  <option key={c.value} value={c.value}>
+                    {c.label}
+                  </option>
+                ))}
+              </select>
+            </div>
           ))}
         </div>
 
         <div className="flex flex-wrap items-end gap-4">
-          <label className="flex flex-col gap-1 text-xs text-zinc-600 dark:text-zinc-400">
-            文字顏色
-            <select
-              value={color}
-              onChange={(e) => setColor(Number(e.target.value) as LedColor)}
-              className="rounded-lg border border-zinc-200 bg-zinc-50 px-2 py-1.5 text-sm dark:border-zinc-700 dark:bg-zinc-950"
-            >
-              {LED_COLORS.map((c) => (
-                <option key={c.value} value={c.value}>
-                  {c.label}
-                </option>
-              ))}
-            </select>
-          </label>
-
           <div className="flex flex-col gap-1 text-xs text-zinc-600 dark:text-zinc-400">
             顯示模式
             <div className="flex items-center gap-3 py-1.5">
@@ -672,6 +937,83 @@ function DisplayMessagePanel({ sn }: { sn: string }) {
   );
 }
 
+function MonitorEventCard({ e }: { e: PlateResultEvent }) {
+  const success = isSuccessfulRecognition(e);
+  const time = e.created_at ? new Date(e.created_at).toLocaleString() : "";
+  return (
+    <div
+      className={`flex items-start gap-3 rounded-xl border p-3 ${
+        success
+          ? "border-emerald-300 bg-emerald-50 dark:border-emerald-800 dark:bg-emerald-950/40"
+          : "border-zinc-200 bg-white dark:border-zinc-800 dark:bg-zinc-900"
+      }`}
+    >
+      {e.image_base64 ? (
+        <img
+          src={`data:image/jpeg;base64,${e.image_base64}`}
+          alt={e.plate_raw || "辨識照片"}
+          className="h-20 w-28 shrink-0 rounded-lg border border-zinc-200 object-cover dark:border-zinc-700"
+        />
+      ) : (
+        <div className="flex h-20 w-28 shrink-0 items-center justify-center rounded-lg border border-dashed border-zinc-300 text-xs text-zinc-400 dark:border-zinc-700">
+          無照片
+        </div>
+      )}
+      <div className="flex min-w-0 flex-1 flex-col gap-1">
+        <div className="flex flex-wrap items-center gap-2">
+          {success ? (
+            <span className="rounded-full bg-emerald-600 px-2 py-0.5 text-xs font-medium text-white">
+              ✅ 辨識成功
+            </span>
+          ) : (
+            <span className="rounded-full bg-zinc-200 px-2 py-0.5 text-xs text-zinc-600 dark:bg-zinc-800 dark:text-zinc-400">
+              無車 / 待命
+            </span>
+          )}
+          <span className="font-mono text-base font-semibold">{e.plate_raw || "—"}</span>
+          <span className="text-xs text-zinc-500">{e.command}</span>
+        </div>
+        <div className="flex flex-wrap gap-x-3 gap-y-0.5 text-xs text-zinc-500">
+          <span>設備 {e.device_sn}</span>
+          <span>來源 {e.source === "mqtt" ? "MQTT" : "HTTP"}</span>
+          {e.confidence !== null && <span>信心度 {e.confidence}</span>}
+          {e.valid_plate && <span>valid_plate {e.valid_plate}</span>}
+          <span>觸發時間 {e.trigger_time || "—"}</span>
+          <span>收到時間 {time}</span>
+        </div>
+        {e.image_saved_path && (
+          <span className="truncate text-xs text-zinc-400" title={e.image_saved_path}>
+            已存檔：{e.image_saved_path}
+          </span>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function MonitorPanel({ events, connected }: { events: PlateResultEvent[]; connected: boolean }) {
+  const successCount = events.filter(isSuccessfulRecognition).length;
+  return (
+    <div className="flex flex-col gap-3">
+      <div className="flex flex-wrap items-center gap-3">
+        <StatusBadge ok={connected}>{connected ? "監測中（即時推播）" : "連線中斷，嘗試重新連線…"}</StatusBadge>
+        <span className="text-sm text-zinc-600 dark:text-zinc-400">
+          共 {events.length} 筆，{successCount} 筆辨識成功
+        </span>
+      </div>
+      {events.length === 0 ? (
+        <p className="text-sm text-zinc-500">目前還沒有辨識結果。設備有辨識結果時會即時顯示在這裡。</p>
+      ) : (
+        <div className="flex flex-col gap-2">
+          {events.map((e) => (
+            <MonitorEventCard key={e.id} e={e} />
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
 export default function ParkingApiTestPage() {
   const [tab, setTab] = useState<Tab>("downlink");
   const [sn, setSn] = useState(DEFAULT_SN);
@@ -699,6 +1041,28 @@ export default function ParkingApiTestPage() {
   }, []);
 
   const simulator = status?.simulators.find((s) => s.sn === sn);
+  const selectedDeviceIp = status?.devices.find((d) => d.sn === sn)?.ip ?? null;
+
+  // 即時監測：跟 tab 無關，整頁掛著就好，切頁籤不會斷線、收到辨識成功也能跳提示
+  const [monitorEvents, setMonitorEvents] = useState<PlateResultEvent[]>([]);
+  const [monitorConnected, setMonitorConnected] = useState(false);
+  const [toasts, setToasts] = useState<{ id: string; event: PlateResultEvent }[]>([]);
+
+  useEffect(() => {
+    const source = new EventSource("/api/parking/results/stream");
+    source.addEventListener("ready", () => setMonitorConnected(true));
+    source.onerror = () => setMonitorConnected(false);
+    source.addEventListener("result", (e) => {
+      setMonitorConnected(true);
+      const event = JSON.parse((e as MessageEvent).data) as PlateResultEvent;
+      setMonitorEvents((prev) => [event, ...prev].slice(0, 50));
+      if (isSuccessfulRecognition(event)) {
+        setToasts((prev) => [...prev, { id: event.id, event }]);
+        setTimeout(() => setToasts((prev) => prev.filter((t) => t.id !== event.id)), 6000);
+      }
+    });
+    return () => source.close();
+  }, []);
 
   const toggleSimulator = async () => {
     setSimBusy(true);
@@ -712,14 +1076,14 @@ export default function ParkingApiTestPage() {
   };
 
   const run = useCallback(
-    async (key: string): Promise<RunResult> => {
+    async (key: string, overrideData?: unknown): Promise<RunResult> => {
       const [kind, command] = key.split(":");
       const text = texts[key] ?? "";
       setBusy((b) => new Set(b).add(key));
       const start = performance.now();
       let result: RunResult;
       try {
-        const data = text.trim() ? JSON.parse(text) : null;
+        const data = overrideData !== undefined ? overrideData : text.trim() ? JSON.parse(text) : null;
         let res: { status: number; json: Record<string, unknown> };
         if (kind === "http") {
           res = await callApi("/api/parking/http/result", data);
@@ -810,6 +1174,33 @@ export default function ParkingApiTestPage() {
 
   return (
     <div className="min-h-full flex-1 bg-zinc-50 font-sans text-zinc-900 dark:bg-black dark:text-zinc-100">
+      {toasts.length > 0 && (
+        <div className="fixed right-4 top-4 z-50 flex w-80 flex-col gap-2">
+          {toasts.map((t) => (
+            <div
+              key={t.id}
+              className="flex items-start gap-2 rounded-xl border border-emerald-300 bg-white p-2.5 shadow-lg dark:border-emerald-800 dark:bg-zinc-900"
+            >
+              {t.event.image_base64 ? (
+                <img
+                  src={`data:image/jpeg;base64,${t.event.image_base64}`}
+                  alt={t.event.plate_raw}
+                  className="h-14 w-20 shrink-0 rounded-lg object-cover"
+                />
+              ) : (
+                <div className="flex h-14 w-20 shrink-0 items-center justify-center rounded-lg bg-zinc-100 text-xs text-zinc-400 dark:bg-zinc-800">
+                  無照片
+                </div>
+              )}
+              <div className="flex min-w-0 flex-col gap-0.5">
+                <span className="text-xs font-medium text-emerald-700 dark:text-emerald-400">✅ 辨識成功</span>
+                <span className="truncate font-mono text-sm font-semibold">{t.event.plate_raw}</span>
+                <span className="truncate text-xs text-zinc-500">{t.event.device_sn}</span>
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
       <div className="mx-auto flex max-w-6xl flex-col gap-4 px-4 py-6">
         <header className="flex flex-col gap-3">
           <div>
@@ -820,12 +1211,33 @@ export default function ParkingApiTestPage() {
           </div>
           <div className="flex flex-wrap items-center gap-3 rounded-xl border border-zinc-200 bg-white p-3 dark:border-zinc-800 dark:bg-zinc-900">
             <label className="flex items-center gap-2 text-sm">
-              設備 SN
-              <input
-                value={sn}
-                onChange={(e) => setSn(e.target.value.trim())}
-                className="w-64 rounded-lg border border-zinc-200 bg-zinc-50 px-2 py-1 font-mono text-sm dark:border-zinc-700 dark:bg-zinc-950"
-              />
+              區網設備
+              <select
+                value={status?.devices.some((d) => d.sn === sn) ? sn : ""}
+                onChange={(e) => e.target.value && setSn(e.target.value)}
+                className="w-56 rounded-lg border border-zinc-200 bg-zinc-50 px-2 py-1 text-sm dark:border-zinc-700 dark:bg-zinc-950"
+              >
+                <option value="" disabled={!status?.devices.length}>
+                  {status?.devices.length ? "— 選擇偵測到的設備 —" : "尚未偵測到設備"}
+                </option>
+                {status?.devices.map((d) => (
+                  <option key={d.sn} value={d.sn}>
+                    {d.sn} · {d.ip ?? "IP 未知"}
+                    {d.online ? "" : "（離線）"}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <label className="flex flex-col gap-0.5 text-sm">
+              <span className="flex items-center gap-2">
+                設備 SN
+                <input
+                  value={sn}
+                  onChange={(e) => setSn(e.target.value.trim())}
+                  className="w-64 rounded-lg border border-zinc-200 bg-zinc-50 px-2 py-1 font-mono text-sm dark:border-zinc-700 dark:bg-zinc-950"
+                />
+              </span>
+              {selectedDeviceIp && <span className="pl-[4.5rem] text-xs text-zinc-500">IP {selectedDeviceIp}</span>}
             </label>
             <StatusBadge ok={!!status?.platformConnected}>
               Broker {status?.broker || "-"} {status?.platformConnected ? "已連線" : "未連線"}
@@ -848,6 +1260,8 @@ export default function ParkingApiTestPage() {
             {status?.error && <span className="text-sm text-rose-600">{status.error}</span>}
           </div>
         </header>
+
+        <CaptureSettingsPanel />
 
         <nav className="flex flex-wrap gap-1 border-b border-zinc-200 dark:border-zinc-800">
           {TABS.map((t) => {
@@ -929,6 +1343,11 @@ export default function ParkingApiTestPage() {
           <div className="grid grid-cols-1 gap-3 lg:grid-cols-2">
             {cardsFor(tab).map((spec) => {
               const key = `${tab}:${spec.command}`;
+              const setSwitch = (switchType: "on" | "off") => {
+                const data = { switchType };
+                setTexts((t) => ({ ...t, [key]: pretty(data) }));
+                run(key, data);
+              };
               return (
                 <CommandCard
                   key={key}
@@ -939,6 +1358,14 @@ export default function ParkingApiTestPage() {
                   onSend={() => run(key)}
                   busy={busy.has(key) || needsSimulator}
                   result={results[key]}
+                  quickActions={
+                    tab === "downlink" && spec.command === "LongOpen"
+                      ? [
+                          { label: "開啟常開", tone: "on", onClick: () => setSwitch("on") },
+                          { label: "關閉常開", tone: "off", onClick: () => setSwitch("off") },
+                        ]
+                      : undefined
+                  }
                 />
               );
             })}
@@ -948,6 +1375,7 @@ export default function ParkingApiTestPage() {
         {tab === "records" && <RecordsPanel sn={sn} />}
         {tab === "devices" && <DeviceScanPanel simulators={status?.simulators ?? []} />}
         {tab === "display" && <DisplayMessagePanel sn={sn} />}
+        {tab === "monitor" && <MonitorPanel events={monitorEvents} connected={monitorConnected} />}
       </div>
     </div>
   );
