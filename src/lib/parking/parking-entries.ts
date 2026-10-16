@@ -216,17 +216,35 @@ export async function listEntries({
   return docs.map(toEntry);
 }
 
-/** 繳費機用：車牌以 suffix 結尾的場內車輛（車牌存檔時已去掉連字號），最近進場的在前 */
-export async function findInsideByPlateSuffix(suffix: string, limit = 10): Promise<ParkingEntry[]> {
-  const keyword = normalizePlate(suffix).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-  if (!keyword) return [];
-  const docs = await (await entries())
-    .find({ exited: false, plate: { $regex: `${keyword}$` } })
-    .sort({ entryTime: -1 })
-    .limit(limit)
-    .toArray();
-  return docs.map(toEntry);
+// ---- 繳費機 ----
+
+export interface KioskVehicle {
+  entry: ParkingEntry;
+  hasImage: boolean;
 }
+
+/**
+ * 繳費機用：車牌包含 digits 的場內車輛；digits 為空時列出全部場內車輛。
+ * 最近進場的在前
+ */
+export async function searchInsideVehicles(digits: string, limit = 500): Promise<KioskVehicle[]> {
+  const filter: Filter<EntryDoc> = { exited: false };
+  const keyword = normalizePlate(digits).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  if (keyword) filter.plate = { $regex: keyword };
+  const docs = await (await entries()).find(filter).sort({ entryTime: -1 }).limit(limit).toArray();
+  return docs.map((doc) => ({ entry: toEntry(doc), hasImage: Boolean(doc.entryImagePath || doc.entryResultId) }));
+}
+
+/** 繳費機點選車輛後讀取該筆場內紀錄；已出場或不存在時丟錯 */
+export async function getInsideEntry(id: unknown): Promise<ParkingEntry> {
+  const doc = await (await entries()).findOne({ _id: toObjectId(id) });
+  if (!doc) throw new ParkingEntryError("找不到這筆進場紀錄", 404);
+  if (doc.exited) throw new ParkingEntryError("此車輛已出場", 409);
+  return toEntry(doc);
+}
+
+/** 繳費機收款完成後記錄繳費時間與金額 */
+export const markPaid = (id: unknown, amount: number) => updateEntry(id, { payTime: new Date(), amount });
 
 function parseTime(value: unknown, label: string): Date {
   const d = typeof value === "string" && value ? new Date(value) : null;

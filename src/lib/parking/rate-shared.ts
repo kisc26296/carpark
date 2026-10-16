@@ -32,7 +32,20 @@ export interface RateSettings {
   dailyMax: number;
   /** 單次收費：在繳費機輸入 4 位數代碼，收取固定金額 */
   singleCharges: SingleCharge[];
+  /** 啟用的支付方式，繳費機只顯示這些按鈕 */
+  paymentMethods: PaymentMethod[];
 }
+
+export const PAYMENT_METHODS = [
+  { id: "cash", label: "現金結帳" },
+  { id: "card", label: "信用卡結帳" },
+  { id: "applePay", label: "Apple Pay" },
+  { id: "linePay", label: "LINE Pay" },
+  { id: "googlePay", label: "Google Pay" },
+  { id: "samsungPay", label: "Samsung Pay" },
+] as const;
+
+export type PaymentMethod = (typeof PAYMENT_METHODS)[number]["id"];
 
 export interface SingleCharge {
   /** 4 位數字代碼，不可重複 */
@@ -61,6 +74,8 @@ export const DEFAULT_RATE_SETTINGS: RateSettings = {
   dayMode: "rolling",
   dailyMax: 150,
   singleCharges: [],
+  // 加入這個設定前繳費機六種都會顯示，預設維持全部啟用
+  paymentMethods: PAYMENT_METHODS.map((m) => m.id),
 };
 
 /** 一列時段收費是否成立：時間都是 4 位數、開始早於結束，單位與金額都大於 0 */
@@ -133,10 +148,25 @@ export function validateRateSettings(raw: unknown): { ok: true; value: RateSetti
     singleCharges.push({ code, amount });
   });
 
+  // 支付方式：只留認得的，依 PAYMENT_METHODS 的順序；沒帶這個欄位時用預設值
+  const paymentMethods: PaymentMethod[] = Array.isArray(r.paymentMethods)
+    ? PAYMENT_METHODS.map((m) => m.id).filter((id) => (r.paymentMethods as unknown[]).includes(id))
+    : [...DEFAULT_RATE_SETTINGS.paymentMethods];
+
   if (errors.length) return { ok: false, errors };
   return {
     ok: true,
-    value: { entryBufferMinutes, exitBufferMinutes, unitMinutes, unitAmount, weekdays, dayMode, dailyMax, singleCharges },
+    value: {
+      entryBufferMinutes,
+      exitBufferMinutes,
+      unitMinutes,
+      unitAmount,
+      weekdays,
+      dayMode,
+      dailyMax,
+      singleCharges,
+      paymentMethods,
+    },
   };
 }
 

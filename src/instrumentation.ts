@@ -8,6 +8,14 @@ export async function register() {
       console.error("[mqtt] 啟動失敗:", error instanceof Error ? error.message : error);
     }
 
+    // 收找零紀錄：找零錢機出幣、紙鈔機收鈔時自動增減數量（要在設備連線前開始訂閱）
+    try {
+      const { startCashInventoryTracking } = await import("@/lib/parking/cash-inventory");
+      await startCashInventoryTracking();
+    } catch (error) {
+      console.error("[cash-inventory] 啟動失敗:", error instanceof Error ? error.message : error);
+    }
+
     // 現金設備依上次的設定自動連回 COM port；開不起來會在背景每 5 秒重試
     try {
       const { getAllConfigs } = await import("@/lib/cash-device/config-store");

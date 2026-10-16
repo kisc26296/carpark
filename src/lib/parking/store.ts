@@ -19,6 +19,12 @@ export const COLLECTIONS = {
   counters: "counters",
   /** 系統設定（辨識照片資料夾等），一種設定一筆，_id 為設定名稱 */
   systemSettings: "system_settings",
+  /** 收找零紀錄：硬幣 / 收鈔機數量，只有一筆（_id: "current"） */
+  cashInventory: "cash_inventory",
+  /** 收找零紀錄的手動操作紀錄（修改數量、補幣、收鈔機歸零） */
+  cashInventoryLogs: "cash_inventory_logs",
+  /** 登入使用者帳號（密碼雜湊、角色與功能權限），帳號不可重複 */
+  users: "user",
 } as const;
 
 export type CommandStatus = "pending" | "success" | "failed" | "timeout" | "sent";
@@ -44,6 +50,11 @@ async function ensureIndexes(db: Db): Promise<void> {
     db.collection(COLLECTIONS.parkingEntries).createIndex({ no: 1 }, { unique: true }),
     db.collection(COLLECTIONS.parkingEntries).createIndex({ plate: 1, exited: 1, entryTime: -1 }),
     db.collection(COLLECTIONS.parkingEntries).createIndex({ entryTime: -1 }),
+    db.collection(COLLECTIONS.cashInventoryLogs).createIndex({ time: -1 }),
+    // user 集合裡可能有沒有帳號的其他資料，只對有帳號的文件要求不重複
+    db
+      .collection(COLLECTIONS.users)
+      .createIndex({ username: 1 }, { unique: true, partialFilterExpression: { username: { $type: "string" } } }),
   ]);
 }
 

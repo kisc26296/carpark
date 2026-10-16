@@ -9,9 +9,16 @@ import {
   type CashDeviceStatus,
   type ComPortInfo,
 } from "@/lib/cash-device/shared";
+import {
+  VIDEO_EXTENSIONS,
+  youtubeId,
+  type KioskVideoPlayer,
+  type KioskVideoSettings as KioskVideoSettingsData,
+  type KioskVideoSource,
+} from "@/lib/parking/kiosk-video-shared";
 import { CAMERA_ROLE_LABELS, type CameraInfo, type CameraRole } from "@/lib/parking/parking-entry-shared";
 
-// 資料庫設定：現金設備的 COM port 與連線測試、入口 / 出口攝影機照片儲存位置
+// 資料庫設定：停車場名稱、現金設備的 COM port 與連線測試、入口 / 出口攝影機照片儲存位置、繳費機廣告影片
 
 const smallButtonClass =
   "whitespace-nowrap rounded border border-gray-300 bg-white px-3 py-1 text-sm hover:bg-gray-100 disabled:cursor-not-allowed disabled:opacity-50";
@@ -256,22 +263,45 @@ const captureValue = (info: CaptureInfo, target: CaptureTarget) =>
       ? { dir: info.exitDir, exists: info.exitExists }
       : { dir: info.dir, exists: info.exists };
 
-/** 伺服器端資料夾瀏覽，選好後回傳完整路徑 */
-function FolderPicker({ initial, onPick, onClose }: { initial: string; onPick: (dir: string) => void; onClose: () => void }) {
-  const [current, setCurrent] = useState<{ path: string | null; parent: string | null; entries: { name: string; path: string }[] } | null>(null);
+interface BrowseEntry {
+  name: string;
+  path: string;
+  type: "dir" | "file";
+}
+
+/** 伺服器端資料夾瀏覽，選好後回傳完整路徑；mode="video" 時改成選影片檔 */
+function FolderPicker({
+  initial,
+  onPick,
+  onClose,
+  mode = "folder",
+}: {
+  initial: string;
+  onPick: (path: string) => void;
+  onClose: () => void;
+  mode?: "folder" | "video";
+}) {
+  const [current, setCurrent] = useState<{ path: string | null; parent: string | null; entries: BrowseEntry[] } | null>(null);
   const [error, setError] = useState<string | null>(null);
 
-  const open = useCallback(async (p: string | null) => {
-    try {
-      const url = p ? `/api/parking/capture-settings/browse?path=${encodeURIComponent(p)}` : "/api/parking/capture-settings/browse";
-      const json = await api<{ ok?: boolean; error?: string; path: string | null; parent: string | null; entries: { name: string; path: string }[] }>(url);
-      if (json.ok === false) return setError(json.error ?? "讀取資料夾失敗");
-      setCurrent(json);
-      setError(null);
-    } catch {
-      setError("連不到伺服器");
-    }
-  }, []);
+  const open = useCallback(
+    async (p: string | null) => {
+      try {
+        const params = new URLSearchParams();
+        if (p) params.set("path", p);
+        if (mode === "video") params.set("files", "video");
+        const json = await api<{ ok?: boolean; error?: string; path: string | null; parent: string | null; entries: BrowseEntry[] }>(
+          `/api/parking/capture-settings/browse?${params}`,
+        );
+        if (json.ok === false) return setError(json.error ?? "讀取資料夾失敗");
+        setCurrent(json);
+        setError(null);
+      } catch {
+        setError("連不到伺服器");
+      }
+    },
+    [mode],
+  );
 
   useEffect(() => {
     // eslint-disable-next-line react-hooks/set-state-in-effect -- 開啟時讀取起始資料夾；setState 都在 await 之後
@@ -281,7 +311,7 @@ function FolderPicker({ initial, onPick, onClose }: { initial: string; onPick: (
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4" onClick={onClose}>
       <div className="flex max-h-[80vh] w-full max-w-lg flex-col rounded bg-white p-4 shadow-xl" onClick={(e) => e.stopPropagation()}>
-        <div className="mb-2 font-medium">選擇資料夾（伺服器主機上）</div>
+        <div className="mb-2 font-medium">{mode === "video" ? "選擇影片檔" : "選擇資料夾"}（伺服器主機上）</div>
         <div className="mb-2 break-all rounded bg-gray-50 px-2 py-1 font-mono text-xs">{current?.path ?? "選擇磁碟機"}</div>
         {error && <div className="mb-2 text-red-600">{error}</div>}
         <div className="min-h-40 flex-1 overflow-auto rounded border border-gray-200">
@@ -291,24 +321,34 @@ function FolderPicker({ initial, onPick, onClose }: { initial: string; onPick: (
             </button>
           )}
           {current?.entries.map((e) => (
-            <button key={e.path} type="button" onClick={() => open(e.path)} className="block w-full px-3 py-1.5 text-left hover:bg-gray-100">
-              📁 {e.name}
+            <button
+              key={e.path}
+              type="button"
+              onClick={() => (e.type === "file" ? onPick(e.path) : open(e.path))}
+              className="block w-full px-3 py-1.5 text-left hover:bg-gray-100"
+            >
+              {e.type === "file" ? "🎬" : "📁"} {e.name}
             </button>
           ))}
-          {current && current.entries.length === 0 && <div className="px-3 py-2 text-gray-500">沒有子資料夾</div>}
+          {current && current.entries.length === 0 && (
+            <div className="px-3 py-2 text-gray-500">{mode === "video" ? "沒有子資料夾或影片檔" : "沒有子資料夾"}</div>
+          )}
         </div>
+        {mode === "video" && <p className="mt-2 text-xs text-gray-500">點選影片檔即可選取</p>}
         <div className="mt-3 flex justify-end gap-2">
           <button type="button" onClick={onClose} className={smallButtonClass}>
             取消
           </button>
-          <button
-            type="button"
-            onClick={() => current?.path && onPick(current.path)}
-            disabled={!current?.path}
-            className="rounded bg-[#428bca] px-3 py-1 text-sm text-white hover:bg-[#3071a9] disabled:opacity-50"
-          >
-            使用這個資料夾
-          </button>
+          {mode === "folder" && (
+            <button
+              type="button"
+              onClick={() => current?.path && onPick(current.path)}
+              disabled={!current?.path}
+              className="rounded bg-[#428bca] px-3 py-1 text-sm text-white hover:bg-[#3071a9] disabled:opacity-50"
+            >
+              使用這個資料夾
+            </button>
+          )}
         </div>
       </div>
     </div>
@@ -503,16 +543,220 @@ function CaptureFolderSettings() {
   );
 }
 
+/** 停車場名稱，顯示在繳費機上方抬頭 */
+function ParkingLotNameSettings() {
+  const [saved, setSaved] = useState<string | null>(null);
+  const [name, setName] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [message, setMessage] = useState<{ ok: boolean; text: string } | null>(null);
+
+  useEffect(() => {
+    api<{ ok: boolean; error?: string; info?: { name: string } }>("/api/parking/lot-info")
+      .then((json) => {
+        if (!json.ok || !json.info) return setMessage({ ok: false, text: json.error ?? "讀取停車場名稱失敗" });
+        setSaved(json.info.name);
+        setName(json.info.name);
+      })
+      .catch(() => setMessage({ ok: false, text: "連不到伺服器" }));
+  }, []);
+
+  const save = async () => {
+    setBusy(true);
+    setMessage(null);
+    try {
+      const json = await api<{ ok: boolean; error?: string; info?: { name: string } }>("/api/parking/lot-info", {
+        method: "PUT",
+        body: JSON.stringify({ name }),
+      });
+      if (json.ok && json.info) {
+        setSaved(json.info.name);
+        setName(json.info.name);
+        setMessage({ ok: true, text: json.info.name ? "停車場名稱已儲存" : "停車場名稱已清除" });
+      } else {
+        setMessage({ ok: false, text: json.error ?? "儲存失敗" });
+      }
+    } catch {
+      setMessage({ ok: false, text: "連不到伺服器" });
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <section className="space-y-2">
+      <div className="text-xs text-gray-700">停車場名稱</div>
+      <p className="text-xs text-gray-500">顯示在繳費機上方抬頭；未設定時顯示「停車場繳費系統」</p>
+      <div className="flex flex-wrap items-center gap-2">
+        <input
+          value={name}
+          onChange={(e) => setName(e.target.value)}
+          maxLength={40}
+          disabled={saved === null}
+          placeholder="例如 亞洲電腦整合(股)公司"
+          className={`${inputClass} min-w-0 flex-1`}
+        />
+        <button type="button" onClick={save} disabled={busy || saved === null || name.trim() === saved} className={smallButtonClass}>
+          儲存
+        </button>
+      </div>
+      {message && <div className={message.ok ? "text-green-700" : "text-red-600"}>{message.text}</div>}
+    </section>
+  );
+}
+
+type KioskVideoInfo =KioskVideoSettingsData & { fileExists: boolean; player: KioskVideoPlayer };
+
+/** 繳費機下方廣告影片：播放伺服器主機上的影片檔或網路連結 */
+function KioskVideoSettings() {
+  const [info, setInfo] = useState<KioskVideoInfo | null>(null);
+  const [source, setSource] = useState<KioskVideoSource>("file");
+  const [filePath, setFilePath] = useState("");
+  const [url, setUrl] = useState("");
+  const [picking, setPicking] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [message, setMessage] = useState<{ ok: boolean; text: string } | null>(null);
+
+  const apply = (video: KioskVideoInfo) => {
+    setInfo(video);
+    setSource(video.source);
+    setFilePath(video.filePath ?? "");
+    setUrl(video.url ?? "");
+  };
+
+  useEffect(() => {
+    api<{ ok: boolean; error?: string; video?: KioskVideoInfo }>("/api/parking/kiosk-video")
+      .then((json) => (json.ok && json.video ? apply(json.video) : setMessage({ ok: false, text: json.error ?? "讀取影片設定失敗" })))
+      .catch(() => setMessage({ ok: false, text: "連不到伺服器" }));
+  }, []);
+
+  const save = async () => {
+    setBusy(true);
+    setMessage(null);
+    try {
+      const json = await api<{ ok: boolean; error?: string; video?: KioskVideoInfo }>("/api/parking/kiosk-video", {
+        method: "PUT",
+        body: JSON.stringify({ source, filePath, url }),
+      });
+      if (json.ok && json.video) {
+        apply(json.video);
+        setMessage({ ok: true, text: "影片設定已儲存，繳費機約 1 分鐘內會換成新影片（重新整理會立即套用）" });
+      } else {
+        setMessage({ ok: false, text: json.error ?? "儲存失敗" });
+      }
+    } catch {
+      setMessage({ ok: false, text: "連不到伺服器" });
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const dirty =
+    info !== null && (source !== info.source || filePath.trim() !== (info.filePath ?? "") || url.trim() !== (info.url ?? ""));
+  const isYoutube = source === "url" && youtubeId(url.trim()) !== null;
+
+  return (
+    <section className="space-y-2">
+      <div className="text-xs text-gray-700">繳費機廣告影片</div>
+      <p className="text-xs text-gray-500">
+        繳費機畫面下方循環播放（靜音）。影片檔在執行伺服器的主機上，格式 {Object.keys(VIDEO_EXTENSIONS).join("、")}；
+        網路連結可以是影片檔網址或 YouTube 連結。
+      </p>
+      {!info && !message && <div className="text-gray-500">讀取中…</div>}
+      {info && (
+        <div className="space-y-2">
+          <label className="flex flex-wrap items-center gap-2">
+            <input type="radio" name="kioskVideoSource" checked={source === "file"} onChange={() => setSource("file")} />
+            <span className="w-20 shrink-0 font-medium">影片檔</span>
+            <input
+              value={filePath}
+              onChange={(e) => setFilePath(e.target.value)}
+              onFocus={() => setSource("file")}
+              placeholder="例如 D:\廣告\parking.mp4"
+              className={`${inputClass} min-w-0 flex-1 font-mono`}
+            />
+            <button
+              type="button"
+              onClick={() => {
+                setSource("file");
+                setPicking(true);
+              }}
+              className={smallButtonClass}
+            >
+              瀏覽…
+            </button>
+          </label>
+          <label className="flex flex-wrap items-center gap-2">
+            <input type="radio" name="kioskVideoSource" checked={source === "url"} onChange={() => setSource("url")} />
+            <span className="w-20 shrink-0 font-medium">網路連結</span>
+            <input
+              value={url}
+              onChange={(e) => setUrl(e.target.value)}
+              onFocus={() => setSource("url")}
+              placeholder="例如 https://example.com/ad.mp4 或 https://www.youtube.com/watch?v=…"
+              className={`${inputClass} min-w-0 flex-1 font-mono`}
+            />
+          </label>
+          {isYoutube && <p className="pl-6 text-xs text-gray-500">YouTube 連結會用內嵌播放器播放，繳費機需要能連上網際網路</p>}
+          <div className="flex flex-wrap items-center gap-3">
+            <button type="button" onClick={save} disabled={busy || !dirty} className={smallButtonClass}>
+              儲存
+            </button>
+            {message && <span className={message.ok ? "text-green-700" : "text-red-600"}>{message.text}</span>}
+          </div>
+          <div className="text-xs text-gray-500">
+            目前播放：
+            {info.updatedAt === null
+              ? "尚未設定，播放預設影片 public/ads/parking-ad.mp4"
+              : info.source === "url"
+                ? <span className="font-mono">{info.url}</span>
+                : (
+                    <>
+                      <span className="font-mono">{info.filePath}</span>{" "}
+                      {info.fileExists ? <span className="text-green-700">（檔案存在）</span> : <span className="text-red-600">（檔案不存在）</span>}
+                    </>
+                  )}
+          </div>
+          {info.player && (
+            <div className="aspect-video w-full max-w-sm overflow-hidden rounded bg-black">
+              {info.player.type === "youtube" ? (
+                <iframe src={info.player.src} title="影片預覽" allow="autoplay; encrypted-media" className="h-full w-full" />
+              ) : (
+                <video key={info.player.src} src={info.player.src} controls muted playsInline className="h-full w-full" />
+              )}
+            </div>
+          )}
+        </div>
+      )}
+      {!info && message && <div className="text-red-600">{message.text}</div>}
+      {picking && (
+        <FolderPicker
+          mode="video"
+          initial={filePath.replace(/[\\/][^\\/]*$/, "")}
+          onClose={() => setPicking(false)}
+          onPick={(p) => {
+            setFilePath(p);
+            setPicking(false);
+          }}
+        />
+      )}
+    </section>
+  );
+}
+
 export function DatabaseSettings() {
   return (
     <div className="space-y-6 text-sm text-gray-900">
       <p className="rounded bg-gray-50 px-3 py-2 text-xs text-gray-600">
-        這頁的設定都存在 MongoDB 的 carpark 資料庫（COM port：cash_device_config；入口／出口攝影機：devices；照片資料夾：system_settings），
+        這頁的設定都存在 MongoDB 的 carpark 資料庫（COM port：cash_device_config；入口／出口攝影機：devices；停車場名稱、照片資料夾、廣告影片：system_settings），
         伺服器啟動時自動讀取，不需要每次重新設定。
       </p>
+      <ParkingLotNameSettings />
+      <hr className="border-gray-200" />
       <CashDeviceSettings />
       <hr className="border-gray-200" />
       <CaptureFolderSettings />
+      <hr className="border-gray-200" />
+      <KioskVideoSettings />
     </div>
   );
 }

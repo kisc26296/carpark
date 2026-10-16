@@ -44,6 +44,14 @@ export async function listMonthlyRentals(): Promise<MonthlyRental[]> {
   return docs.map(toRental);
 }
 
+/** 依車牌找月租客戶（車牌存檔時已正規化）；不是月租車回傳 null */
+export async function findMonthlyRentalByPlate(plate: string): Promise<MonthlyRental | null> {
+  const key = normalizePlate(plate);
+  if (!key) return null;
+  const doc = await (await collection()).findOne({ plates: key });
+  return doc ? toRental(doc) : null;
+}
+
 export async function createMonthlyRental(input: MonthlyRentalInput): Promise<MonthlyRental> {
   const col = await collection();
   const conflict = await findPlateConflict(input.plates);

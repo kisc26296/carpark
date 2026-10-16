@@ -1,10 +1,11 @@
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
+import { VIDEO_EXTENSIONS } from "@/lib/parking/kiosk-video-shared";
 
 // 給資料夾選擇器用的簡易伺服器端瀏覽：列出指定路徑底下的子資料夾
 // GET 不帶 path：回傳磁碟機代號（Windows）或使用者家目錄（其他平台）
-// GET ?path=xxx：回傳該路徑底下的子資料夾清單
+// GET ?path=xxx：回傳該路徑底下的子資料夾清單；加 &files=video 時一併列出影片檔
 
 async function listDrives(): Promise<string[]> {
   if (process.platform !== "win32") return [os.homedir()];
@@ -42,10 +43,20 @@ export async function GET(request: Request) {
       return Response.json({ ok: false, error: "不是資料夾" }, { status: 400 });
     }
     const names = await fs.readdir(resolved, { withFileTypes: true });
-    const entries = names
+    const byName = (a: { name: string }, b: { name: string }) => a.name.localeCompare(b.name, "zh-Hant");
+    const dirs = names
       .filter((n) => n.isDirectory() && !n.name.startsWith("."))
-      .map((n) => ({ name: n.name, path: path.join(resolved, n.name) }))
-      .sort((a, b) => a.name.localeCompare(b.name, "zh-Hant"));
+      .map((n) => ({ name: n.name, path: path.join(resolved, n.name), type: "dir" as const }))
+      .sort(byName);
+    // ?files=video：資料夾後面再列出可播放的影片檔（影片設定選檔用）
+    const videos =
+      searchParams.get("files") === "video"
+        ? names
+            .filter((n) => n.isFile() && path.extname(n.name).toLowerCase() in VIDEO_EXTENSIONS)
+            .map((n) => ({ name: n.name, path: path.join(resolved, n.name), type: "file" as const }))
+            .sort(byName)
+        : [];
+    const entries = [...dirs, ...videos];
 
     const parsed = path.parse(resolved);
     const isRoot = resolved === parsed.root;

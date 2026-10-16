@@ -4,6 +4,7 @@ import { useEffect, useMemo, useState, type FormEvent } from "react";
 import {
   calculateFee,
   parseRow,
+  PAYMENT_METHODS,
   RATE_WEEKDAYS,
   SINGLE_CHARGE_CODE_PATTERN,
   type FeeResult,
@@ -231,6 +232,31 @@ export function RateSettings() {
 
   return (
     <form className="space-y-5 text-sm text-gray-900" onSubmit={submit}>
+      <div>
+        <div className="text-xs text-gray-700">支付方式</div>
+        <div className="mt-2 flex flex-wrap gap-x-4 gap-y-2">
+          {PAYMENT_METHODS.map((m) => (
+            <label key={m.id} className="flex items-center gap-1">
+              <input
+                type="checkbox"
+                checked={draft.paymentMethods.includes(m.id)}
+                onChange={(e) =>
+                  set(
+                    "paymentMethods",
+                    PAYMENT_METHODS.map((p) => p.id).filter((id) =>
+                      id === m.id ? e.target.checked : draft.paymentMethods.includes(id),
+                    ),
+                  )
+                }
+              />
+              {m.label}
+            </label>
+          ))}
+        </div>
+        <p className="mt-1 text-xs text-gray-500">勾選啟用的支付方式才會顯示在繳費機的繳費畫面；目前只有現金結帳接上收款設備</p>
+      </div>
+
+      <hr className="border-gray-200" />
       <div>
         <div className="text-xs text-gray-700">固定費率</div>
         <div className="mt-2 space-y-3">
