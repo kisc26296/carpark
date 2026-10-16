@@ -30,7 +30,18 @@ export interface RateSettings {
   dayMode: "calendar" | "rolling";
   /** 單日最高收費，0 表示不限制；大於 0 時各時段的最高收費無效 */
   dailyMax: number;
+  /** 單次收費：在繳費機輸入 4 位數代碼，收取固定金額 */
+  singleCharges: SingleCharge[];
 }
+
+export interface SingleCharge {
+  /** 4 位數字代碼，不可重複 */
+  code: string;
+  /** 收取金額（元） */
+  amount: number;
+}
+
+export const SINGLE_CHARGE_CODE_PATTERN = /^\d{4}$/;
 
 export const RATE_ROWS_PER_DAY = 4;
 
@@ -49,6 +60,7 @@ export const DEFAULT_RATE_SETTINGS: RateSettings = {
   ),
   dayMode: "rolling",
   dailyMax: 150,
+  singleCharges: [],
 };
 
 /** 一列時段收費是否成立：時間都是 4 位數、開始早於結束，單位與金額都大於 0 */
@@ -105,10 +117,26 @@ export function validateRateSettings(raw: unknown): { ok: true; value: RateSetti
     });
   });
 
+  // 單次收費：代碼與金額都空白的列略過，其他列代碼必須是 4 位數字且不重複
+  const singleCharges: SingleCharge[] = [];
+  const rawCharges = Array.isArray(r.singleCharges) ? r.singleCharges : [];
+  rawCharges.forEach((item, i) => {
+    const c = (item ?? {}) as Record<string, unknown>;
+    const code = text(c.code);
+    const amountText = text(c.amount);
+    if (code === "" && amountText === "") return;
+    const label = `單次收費第 ${i + 1} 筆`;
+    if (!SINGLE_CHARGE_CODE_PATTERN.test(code)) errors.push(`${label}的代碼必須是 4 位數字`);
+    else if (singleCharges.some((s) => s.code === code)) errors.push(`單次收費代碼 ${code} 重複`);
+    const amount = Number(amountText);
+    if (amountText === "" || !Number.isInteger(amount) || amount < 0) errors.push(`${label}的金額必須是 0 以上的整數`);
+    singleCharges.push({ code, amount });
+  });
+
   if (errors.length) return { ok: false, errors };
   return {
     ok: true,
-    value: { entryBufferMinutes, exitBufferMinutes, unitMinutes, unitAmount, weekdays, dayMode, dailyMax },
+    value: { entryBufferMinutes, exitBufferMinutes, unitMinutes, unitAmount, weekdays, dayMode, dailyMax, singleCharges },
   };
 }
 

@@ -216,6 +216,18 @@ export async function listEntries({
   return docs.map(toEntry);
 }
 
+/** 繳費機用：車牌以 suffix 結尾的場內車輛（車牌存檔時已去掉連字號），最近進場的在前 */
+export async function findInsideByPlateSuffix(suffix: string, limit = 10): Promise<ParkingEntry[]> {
+  const keyword = normalizePlate(suffix).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  if (!keyword) return [];
+  const docs = await (await entries())
+    .find({ exited: false, plate: { $regex: `${keyword}$` } })
+    .sort({ entryTime: -1 })
+    .limit(limit)
+    .toArray();
+  return docs.map(toEntry);
+}
+
 function parseTime(value: unknown, label: string): Date {
   const d = typeof value === "string" && value ? new Date(value) : null;
   if (!d || Number.isNaN(d.getTime())) throw new ParkingEntryError(`${label}格式錯誤`, 400);

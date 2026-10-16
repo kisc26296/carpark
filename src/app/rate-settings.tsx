@@ -5,6 +5,7 @@ import {
   calculateFee,
   parseRow,
   RATE_WEEKDAYS,
+  SINGLE_CHARGE_CODE_PATTERN,
   type FeeResult,
   type RateRow,
   type RateSettings as RateSettingsData,
@@ -12,6 +13,7 @@ import {
 import { toDateTimeLocal } from "@/lib/parking/parking-entry-shared";
 
 // 費率設定：存在 MongoDB carpark.system_settings（_id: "rate"），下方可用目前畫面上的設定試算停車費
+// 單次收費（4 位數代碼 + 金額）也存在同一筆設定，繳費機輸入代碼查詢金額
 
 const inputClass = "border border-gray-400 px-1 py-0.5";
 const cellInputClass = "w-full border border-gray-400 px-1 py-0.5";
@@ -27,12 +29,16 @@ const ROW_FIELDS: { key: keyof RateRow; label: string }[] = [
 ];
 
 /** 表單裡數字欄位用字串，才能讓使用者清空再輸入 */
-type Draft = Omit<RateSettingsData, "entryBufferMinutes" | "exitBufferMinutes" | "unitMinutes" | "unitAmount" | "dailyMax"> & {
+type Draft = Omit<
+  RateSettingsData,
+  "entryBufferMinutes" | "exitBufferMinutes" | "unitMinutes" | "unitAmount" | "dailyMax" | "singleCharges"
+> & {
   entryBufferMinutes: string;
   exitBufferMinutes: string;
   unitMinutes: string;
   unitAmount: string;
   dailyMax: string;
+  singleCharges: { code: string; amount: string }[];
 };
 
 const toDraft = (s: RateSettingsData): Draft => ({
@@ -43,6 +49,7 @@ const toDraft = (s: RateSettingsData): Draft => ({
   unitAmount: String(s.unitAmount),
   dailyMax: String(s.dailyMax),
   weekdays: s.weekdays.map((rows) => rows.map((r) => ({ ...r }))),
+  singleCharges: s.singleCharges.map((c) => ({ code: c.code, amount: String(c.amount) })),
 });
 
 const fromDraft = (d: Draft): RateSettingsData => ({
@@ -52,6 +59,11 @@ const fromDraft = (d: Draft): RateSettingsData => ({
   unitMinutes: Number(d.unitMinutes),
   unitAmount: Number(d.unitAmount),
   dailyMax: Number(d.dailyMax),
+  // 金額空白時送 NaN（JSON 變 null），讓伺服器檢查擋下，不要默默變成 0 元
+  singleCharges: d.singleCharges.map((c) => ({
+    code: c.code.trim(),
+    amount: c.amount.trim() === "" ? NaN : Number(c.amount),
+  })),
 });
 
 // 標題 + 輸入框一列：手機上下排、電腦左右排，皆靠左對齊
@@ -174,6 +186,13 @@ export function RateSettings() {
           ),
         },
     );
+  const setCharge = (index: number, key: "code" | "amount", value: string) =>
+    setDraft(
+      (d) => d && { ...d, singleCharges: d.singleCharges.map((c, i) => (i === index ? { ...c, [key]: value } : c)) },
+    );
+  const addCharge = () => setDraft((d) => d && { ...d, singleCharges: [...d.singleCharges, { code: "", amount: "" }] });
+  const removeCharge = (index: number) =>
+    setDraft((d) => d && { ...d, singleCharges: d.singleCharges.filter((_, i) => i !== index) });
   const copyToAllDays = () => {
     if (!window.confirm(`把${RATE_WEEKDAYS[weekday]}的時段設定複製到其他每一天？`)) return;
     setDraft((d) => d && { ...d, weekdays: d.weekdays.map(() => d.weekdays[weekday].map((r) => ({ ...r }))) });
@@ -325,6 +344,69 @@ export function RateSettings() {
           />
         </label>
         <p>單日最高收費 設為0 表示沒有最高收費 大於0表示一天最多收費設定值 且各自時段所設最高收費無效</p>
+      </div>
+
+      <hr className="border-gray-200" />
+      <div className="space-y-2">
+        <div className="text-xs text-gray-700">單次收費</div>
+        <p>在繳費機輸入 4 位數代碼並按「查詢」，即收取設定的金額</p>
+        <p className="text-xs text-gray-500">代碼和場內車輛的車牌後四碼相同時，繳費機以場內車輛為主</p>
+        {draft.singleCharges.length > 0 && (
+          <table className="w-full max-w-md table-fixed border-collapse text-sm sm:text-base">
+            <thead>
+              <tr className="text-left">
+                <th className="font-medium">代碼(4位數)</th>
+                <th className="font-medium">金額(元)</th>
+                <th className="w-20" />
+              </tr>
+            </thead>
+            <tbody>
+              {draft.singleCharges.map((c, i) => {
+                const filled = c.code.trim() !== "" || c.amount.trim() !== "";
+                const duplicate =
+                  c.code.trim() !== "" && draft.singleCharges.some((o, j) => j !== i && o.code.trim() === c.code.trim());
+                const invalid =
+                  filled && (!SINGLE_CHARGE_CODE_PATTERN.test(c.code.trim()) || c.amount.trim() === "" || duplicate);
+                return (
+                  <tr
+                    key={i}
+                    className={invalid ? "bg-red-50" : ""}
+                    title={duplicate ? "代碼重複" : invalid ? "代碼須為 4 位數字，金額不可空白" : undefined}
+                  >
+                    <td className="p-0">
+                      <input
+                        value={c.code}
+                        onChange={(e) => setCharge(i, "code", e.target.value.replace(/\D/g, "").slice(0, 4))}
+                        inputMode="numeric"
+                        maxLength={4}
+                        className={cellInputClass}
+                      />
+                    </td>
+                    <td className="p-0">
+                      <input
+                        type="number"
+                        min={0}
+                        value={c.amount}
+                        onChange={(e) => setCharge(i, "amount", e.target.value)}
+                        inputMode="numeric"
+                        className={cellInputClass}
+                      />
+                    </td>
+                    <td className="pl-2">
+                      <button type="button" onClick={() => removeCharge(i)} className={smallButtonClass}>
+                        刪除
+                      </button>
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        )}
+        <button type="button" onClick={addCharge} className={smallButtonClass}>
+          新增單次收費
+        </button>
+        <p className="text-xs text-red-600">紅底的列表示代碼不是 4 位數字、代碼重複或金額空白，無法儲存</p>
       </div>
 
       <div className="flex flex-wrap items-center gap-3">
