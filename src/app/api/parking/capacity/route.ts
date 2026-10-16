@@ -2,8 +2,8 @@ import { GateCapacityError, getCapacity, saveCapacity } from "@/lib/parking/gate
 
 export const dynamic = "force-dynamic";
 
-// 讀取車位數：GET /api/parking/capacity → { max, remaining, inside, updatedAt }
-// remaining = max − inside（場內車輛數），依進出場自動計算
+// 讀取車位數：GET /api/parking/capacity → { max, remaining, inside, adjust, updatedAt }
+// remaining = max − inside（場內車輛數）+ adjust（手動調整值），隨進出場增減
 export async function GET() {
   try {
     return Response.json({ ok: true, capacity: await getCapacity() });
@@ -12,9 +12,10 @@ export async function GET() {
   }
 }
 
-// 修改最大車位數：PUT /api/parking/capacity  body: { max }
+// 修改車位數：PUT /api/parking/capacity  body: { max, remaining? }
+// 有帶 remaining 時以它為準，換算成手動調整值存下
 export async function PUT(request: Request) {
-  let body: { max?: unknown };
+  let body: { max?: unknown; remaining?: unknown };
   try {
     body = await request.json();
   } catch {

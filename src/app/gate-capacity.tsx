@@ -3,7 +3,8 @@
 import { useCallback, useEffect, useState, type FormEvent } from "react";
 
 // 進出口開關閘與車位數，放在車輛進場紀錄頁上方（設備設定頁也共用）。
-// 剩餘車位數 = 最大車位數 − 場內車輛數，由伺服器依進出場紀錄自動計算，每 5 秒更新。
+// 剩餘車位數 = 最大車位數 − 場內車輛數 + 手動調整值，由伺服器計算，每 5 秒更新。
+// 剩餘車位數可以手動修改，修改後仍會隨進出場增減。
 
 const buttonClass = "rounded bg-sky-400 px-4 py-2 text-lg text-white hover:bg-sky-500 disabled:opacity-50";
 // 入口一組、出口一組，用不同顏色區分
@@ -22,6 +23,7 @@ interface Capacity {
   max: number;
   remaining: number;
   inside: number;
+  adjust: number;
   updatedAt: string | null;
 }
 
@@ -50,6 +52,8 @@ export function GateAndCapacity() {
   const [capacity, setCapacity] = useState<Capacity | null>(null);
   // 使用者正在修改的最大車位數；null 代表沒在改，顯示資料庫的值
   const [maxDraft, setMaxDraft] = useState<string | null>(null);
+  // 使用者正在修改的剩餘車位數；null 代表沒在改，顯示伺服器計算的值
+  const [remainingDraft, setRemainingDraft] = useState<string | null>(null);
   const [capacityMessage, setCapacityMessage] = useState<{ ok: boolean; text: string } | null>(null);
 
   const loadCapacity = useCallback(async () => {
@@ -97,20 +101,25 @@ export function GateAndCapacity() {
 
   const saveMax = async (e: FormEvent) => {
     e.preventDefault();
-    if (maxDraft === null) return;
+    if (!capacity || (maxDraft === null && remainingDraft === null)) return;
     setBusy("capacity");
     setCapacityMessage(null);
     try {
       const res = await fetch("/api/parking/capacity", {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ max: Number(maxDraft) }),
+        body: JSON.stringify({
+          max: Number(maxDraft ?? capacity.max),
+          // 沒改剩餘車位數就不送，伺服器保留原本的手動調整值
+          ...(remainingDraft !== null ? { remaining: Number(remainingDraft) } : {}),
+        }),
       });
       const json = (await res.json()) as { ok: boolean; error?: string; capacity?: Capacity };
       if (json.ok && json.capacity) {
         setCapacity(json.capacity);
         setMaxDraft(null);
-        setCapacityMessage({ ok: true, text: "最大車位數已儲存" });
+        setRemainingDraft(null);
+        setCapacityMessage({ ok: true, text: "車位數已儲存" });
       } else {
         setCapacityMessage({ ok: false, text: json.error ?? "儲存失敗" });
       }
@@ -122,7 +131,11 @@ export function GateAndCapacity() {
   };
 
   const maxValue = maxDraft ?? (capacity ? String(capacity.max) : "");
-  const dirty = maxDraft !== null && capacity !== null && maxDraft !== String(capacity.max);
+  const remainingValue = remainingDraft ?? (capacity ? String(capacity.remaining) : "");
+  const dirty =
+    capacity !== null &&
+    ((maxDraft !== null && maxDraft !== String(capacity.max)) ||
+      (remainingDraft !== null && remainingDraft !== String(capacity.remaining)));
   const full = capacity !== null && capacity.max > 0 && capacity.remaining === 0;
 
   return (
@@ -162,15 +175,23 @@ export function GateAndCapacity() {
             className={fieldClass}
           />
         </label>
-        <div className="flex flex-col gap-1 sm:flex-row sm:items-center sm:gap-3">
+        <label className="flex flex-col gap-1 sm:flex-row sm:items-center sm:gap-3">
           <span className="font-medium sm:w-36 sm:shrink-0">剩餘車位數:</span>
-          <div className={`${fieldClass} bg-gray-50 ${full ? "font-bold text-red-600" : ""}`}>
-            {capacity ? (full ? `${capacity.remaining}（已滿）` : capacity.remaining) : "—"}
-          </div>
-        </div>
+          <input
+            type="number"
+            min={0}
+            inputMode="numeric"
+            value={remainingValue}
+            onChange={(e) => setRemainingDraft(e.target.value)}
+            className={`${fieldClass} ${full && remainingDraft === null ? "font-bold text-red-600" : ""}`}
+          />
+          {full && remainingDraft === null && <span className="font-bold text-red-600">已滿</span>}
+        </label>
         {capacity && (
           <div className="text-xs text-gray-500 sm:pl-39">
-            自動計算：最大車位數 {capacity.max} − 場內車輛 {capacity.inside} 台，每 {REFRESH_MS / 1000} 秒更新
+            最大車位數 {capacity.max} − 場內車輛 {capacity.inside} 台
+            {capacity.adjust !== 0 && `（手動調整 ${capacity.adjust > 0 ? "+" : ""}${capacity.adjust}）`}
+            ，可直接修改，之後仍隨進出場增減，每 {REFRESH_MS / 1000} 秒更新
             {capacity.inside > capacity.max && capacity.max > 0 && (
               <span className="ml-1 text-red-600">（場內車輛已超過最大車位數）</span>
             )}
