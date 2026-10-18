@@ -1,6 +1,7 @@
 import "server-only";
 import { createCipheriv, createDecipheriv, createHash } from "node:crypto";
-import { isValidUbn, type InvoiceCategory } from "./ezpay-shared";
+import { COLLECTIONS, getParkingDb } from "@/lib/parking/store";
+import { EZPAY_ENV_LABELS, isValidUbn, type EzpayEnv, type InvoiceCategory } from "./ezpay-shared";
 
 // ezPay 電子發票加值服務平台串接（依《電子發票技術串接手冊 EZP_INVI_1.2.2》）
 //
@@ -11,10 +12,12 @@ import { isValidUbn, type InvoiceCategory } from "./ezpay-shared";
 //   query string，前後加上 HashIV=…& 與 &HashKey=…，SHA256 後轉大寫（附件二）
 //
 // 商店代號與金鑰放在 .env.local：
-//   EZPAY_INVOICE_MERCHANT_ID、EZPAY_INVOICE_HASH_KEY（32 字元）、EZPAY_INVOICE_HASH_IV（16 字元）
-//   EZPAY_INVOICE_ENV=production 才會連正式環境，其他一律連測試環境
+//   測試平台 EZPAY_INVOICE_TEST_MERCHANT_ID、EZPAY_INVOICE_TEST_HASH_KEY（32 字元）、EZPAY_INVOICE_TEST_HASH_IV（16 字元）
+//   正式平台 EZPAY_INVOICE_PROD_MERCHANT_ID、EZPAY_INVOICE_PROD_HASH_KEY、EZPAY_INVOICE_PROD_HASH_IV
+// 兩個平台是不同的商店、金鑰也不同。目前用哪個平台存在 carpark.system_settings（_id: "einvoice"），
+// 由「電子發票測試」頁切換（只限管理者），預設測試平台；繳費機開立發票也照這個設定。
 
-export type EzpayEnv = "test" | "production";
+export { type EzpayEnv } from "./ezpay-shared";
 export type EzpayAction = "issue" | "invalid" | "search";
 
 const BASE_URLS: Record<EzpayEnv, string> = {
@@ -46,21 +49,80 @@ export interface EzpayConfig {
   hashIV: string;
 }
 
-/** 讀取 .env.local 的設定；缺少時回傳缺了哪些 */
-export function getEzpayConfig(): { config: EzpayConfig | null; missing: string[]; problems: string[] } {
-  const merchantId = process.env.EZPAY_INVOICE_MERCHANT_ID?.trim() ?? "";
-  const hashKey = process.env.EZPAY_INVOICE_HASH_KEY?.trim() ?? "";
-  const hashIV = process.env.EZPAY_INVOICE_HASH_IV?.trim() ?? "";
-  const env: EzpayEnv = process.env.EZPAY_INVOICE_ENV === "production" ? "production" : "test";
-  const missing = [
-    !merchantId && "EZPAY_INVOICE_MERCHANT_ID",
-    !hashKey && "EZPAY_INVOICE_HASH_KEY",
-    !hashIV && "EZPAY_INVOICE_HASH_IV",
-  ].filter((v): v is string => Boolean(v));
+export interface EzpayCredentials {
+  config: EzpayConfig | null;
+  /** 商店代號（沒設定為 null），給頁面顯示用；金鑰不回傳 */
+  merchantId: string | null;
+  missing: string[];
+  problems: string[];
+}
+
+const ENV_PREFIX: Record<EzpayEnv, string> = { test: "EZPAY_INVOICE_TEST_", production: "EZPAY_INVOICE_PROD_" };
+
+/** 讀取 .env.local 裡某個平台的商店代號與金鑰；缺少時回傳缺了哪些 */
+export function readEzpayCredentials(env: EzpayEnv): EzpayCredentials {
+  const prefix = ENV_PREFIX[env];
+  const read = (name: string) => process.env[prefix + name]?.trim() ?? "";
+  const merchantId = read("MERCHANT_ID");
+  const hashKey = read("HASH_KEY");
+  const hashIV = read("HASH_IV");
+  const missing = ["MERCHANT_ID", "HASH_KEY", "HASH_IV"]
+    .filter((name) => !read(name))
+    .map((name) => prefix + name);
   const problems: string[] = [];
   if (hashKey && Buffer.byteLength(hashKey) !== 32) problems.push(`HashKey 應為 32 字元（目前 ${Buffer.byteLength(hashKey)}）`);
   if (hashIV && Buffer.byteLength(hashIV) !== 16) problems.push(`HashIV 應為 16 字元（目前 ${Buffer.byteLength(hashIV)}）`);
-  return { config: missing.length || problems.length ? null : { env, merchantId, hashKey, hashIV }, missing, problems };
+  return {
+    config: missing.length || problems.length ? null : { env, merchantId, hashKey, hashIV },
+    merchantId: merchantId || null,
+    missing,
+    problems,
+  };
+}
+
+// ---- 目前使用的平台 ----
+
+const SETTINGS_ID = "einvoice";
+
+interface EinvoiceSettingsDoc {
+  _id: string;
+  env: EzpayEnv;
+  updatedAt: Date;
+  updatedBy: string | null;
+}
+
+async function settingsCollection() {
+  return (await getParkingDb()).collection<EinvoiceSettingsDoc>(COLLECTIONS.systemSettings);
+}
+
+/** 目前使用的平台與最後切換的時間、人員；沒設定過為測試平台 */
+export async function getEzpaySettings(): Promise<{ env: EzpayEnv; updatedAt: string | null; updatedBy: string | null }> {
+  const doc = await (await settingsCollection()).findOne({ _id: SETTINGS_ID });
+  return {
+    env: doc?.env === "production" ? "production" : "test",
+    updatedAt: doc?.updatedAt?.toISOString() ?? null,
+    updatedBy: doc?.updatedBy ?? null,
+  };
+}
+
+/** 切換平台；要切過去的平台金鑰沒設定好就不能切 */
+export async function setEzpayEnv(env: unknown, updatedBy: string): Promise<void> {
+  if (env !== "test" && env !== "production") throw new EzpayError("平台必須是 test 或 production", 400);
+  const { config, missing, problems } = readEzpayCredentials(env);
+  if (!config) {
+    const reason = [missing.length ? `缺少 ${missing.join("、")}` : "", ...problems].filter(Boolean).join("；");
+    throw new EzpayError(`${EZPAY_ENV_LABELS[env]}的金鑰還沒設定好（${reason}），請先在 .env.local 設定並重新啟動伺服器`, 400);
+  }
+  await (await settingsCollection()).updateOne(
+    { _id: SETTINGS_ID },
+    { $set: { env, updatedAt: new Date(), updatedBy } },
+    { upsert: true },
+  );
+}
+
+/** 目前使用的平台的設定；env 指定時改用那個平台（例如繳費機重試時沿用開始時的平台） */
+export async function getEzpayConfig(env?: EzpayEnv): Promise<EzpayCredentials> {
+  return readEzpayCredentials(env ?? (await getEzpaySettings()).env);
 }
 
 // ---- 加解密與檢查碼 ----
@@ -146,8 +208,12 @@ export interface EzpayCallResult {
   elapsedMs: number;
 }
 
-export async function callEzpay(action: EzpayAction, data: Record<string, string | number>): Promise<EzpayCallResult> {
-  const { config, missing, problems } = getEzpayConfig();
+export async function callEzpay(
+  action: EzpayAction,
+  data: Record<string, string | number>,
+  env?: EzpayEnv,
+): Promise<EzpayCallResult> {
+  const { config, missing, problems } = await getEzpayConfig(env);
   if (!config) {
     throw new EzpayError(
       [missing.length ? `請在 .env.local 設定 ${missing.join("、")}` : "", ...problems].filter(Boolean).join("；"),

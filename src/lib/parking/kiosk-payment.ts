@@ -17,7 +17,7 @@ import {
 } from "./kiosk-payment-shared";
 import { computeExitCharge } from "./exit-charge";
 import {
-  invoiceUnavailableReason,
+  currentInvoicePlatform,
   issueKioskInvoice,
   newKioskOrderNo,
   type KioskInvoiceChoice,
@@ -223,21 +223,22 @@ async function finish(s: Session, outcome: NonNullable<Session["outcome"]>): Pro
       addMessage(s, `繳費紀錄寫入失敗：${error instanceof Error ? error.message : "未知錯誤"}`),
     );
   }
-  if (outcome === "paid" && s.due > 0) prepareInvoice(s);
+  if (outcome === "paid" && s.due > 0) await prepareInvoice(s);
   s.status = "done";
 }
 
 // ---- 電子發票 ----
 
-function prepareInvoice(s: Session): void {
-  const reason = invoiceUnavailableReason();
-  if (reason) {
-    s.invoice = { status: "unavailable", reason };
+async function prepareInvoice(s: Session): Promise<void> {
+  const platform = await currentInvoicePlatform().catch(() => ({ reason: "電子發票設定讀取失敗" }));
+  if ("reason" in platform) {
+    s.invoice = { status: "unavailable", reason: platform.reason };
     return;
   }
   s.invoiceOrder = {
     sessionId: s.id,
     merchantOrderNo: newKioskOrderNo(),
+    env: platform.env,
     totalAmt: s.due,
     itemName: "停車費",
     entryId: s.target.kind === "entry" ? s.target.entryId : null,

@@ -2,6 +2,10 @@
 
 export type InvoiceCategory = "B2C" | "B2B";
 
+export type EzpayEnv = "test" | "production";
+
+export const EZPAY_ENV_LABELS: Record<EzpayEnv, string> = { test: "測試平台", production: "正式平台" };
+
 /** 統一編號檢查碼（財政部 112 年起的規則：加總能被 5 整除；第 7 碼為 7 時加總 +1 也算） */
 export function isValidUbn(ubn: string): boolean {
   if (!/^\d{8}$/.test(ubn)) return false;

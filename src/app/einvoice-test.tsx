@@ -1,24 +1,16 @@
 "use client";
 
 import { useEffect, useState, type FormEvent, type ReactNode } from "react";
-import { isValidUbn, type InvoiceCategory } from "@/lib/einvoice/ezpay-shared";
+import { EZPAY_ENV_LABELS, isValidUbn, type EzpayEnv, type InvoiceCategory } from "@/lib/einvoice/ezpay-shared";
 
 // 電子發票測試（只限管理者）：透過 /api/einvoice/test 對 ezPay 電子發票加值中心開立、作廢、查詢發票。
-// 商店代號與金鑰設定在 .env.local（EZPAY_INVOICE_*），預設連測試平台。
+// 商店代號與金鑰設定在 .env.local（測試平台 EZPAY_INVOICE_TEST_*、正式平台 EZPAY_INVOICE_PROD_*），
+// 使用哪個平台在這頁切換（同時套用到繳費機），預設測試平台。
 // 送出紀錄只存在這台瀏覽器（localStorage），方便拿剛開的發票號碼去作廢或查詢。
 
 type Action = "issue" | "invalid" | "search";
 type Delivery = "paper" | "carrier" | "love";
 type SearchMode = "invoice" | "order";
-
-interface Status {
-  configured: boolean;
-  env: "test" | "production";
-  merchantId: string | null;
-  missing: string[];
-  problems: string[];
-  selfTest: { checkCode: { ok: boolean }; aes: { ok: boolean } };
-}
 
 interface CallResponse {
   ok: boolean;
@@ -33,6 +25,8 @@ interface CallResponse {
   result?: Record<string, unknown> | null;
   checkCodeValid?: boolean | null;
   elapsedMs?: number;
+  /** 送到哪個平台 */
+  env?: EzpayEnv;
 }
 
 interface LogEntry extends CallResponse {
@@ -101,35 +95,122 @@ function Badge({ tone, children }: { tone: "ok" | "bad" | "muted"; children: Rea
   return <span className={`rounded px-2 py-0.5 text-xs ${cls}`}>{children}</span>;
 }
 
-function StatusPanel({ status, error }: { status: Status | null; error: string }) {
-  if (error) return <p className="text-red-600">{error}</p>;
-  if (!status) return <p className="text-gray-500">讀取設定中…</p>;
-  const selfOk = status.selfTest.checkCode.ok && status.selfTest.aes.ok;
+interface PlatformStatus {
+  configured: boolean;
+  merchantId: string | null;
+  missing: string[];
+  problems: string[];
+}
+
+interface Status {
+  env: EzpayEnv;
+  updatedAt: string | null;
+  updatedBy: string | null;
+  platforms: Record<EzpayEnv, PlatformStatus>;
+  selfTest: { checkCode: { ok: boolean }; aes: { ok: boolean } };
+}
+
+const PLATFORM_HINTS: Record<EzpayEnv, string> = {
+  test: "cinv.ezpay.com.tw，發票不會上傳財政部",
+  production: "inv.ezpay.com.tw，發票會上傳財政部，具法律效力",
+};
+
+function PlatformCard({
+  env,
+  status,
+  active,
+  switching,
+  onSwitch,
+}: {
+  env: EzpayEnv;
+  status: PlatformStatus;
+  active: boolean;
+  switching: boolean;
+  onSwitch: () => void;
+}) {
+  const prod = env === "production";
   return (
-    <div className="space-y-2 rounded border border-gray-200 p-3">
-      <div className="flex flex-wrap items-center gap-x-6 gap-y-2">
-        <span>
-          連線環境：
-          {status.env === "production" ? <Badge tone="bad">正式平台</Badge> : <Badge tone="ok">測試平台</Badge>}
-        </span>
-        <span>商店代號：{status.merchantId ?? <span className="text-gray-400">未設定</span>}</span>
-        <span>
-          金鑰設定：{status.configured ? <Badge tone="ok">完成</Badge> : <Badge tone="bad">未完成</Badge>}
-        </span>
-        <span>
-          加密自我檢查：{selfOk ? <Badge tone="ok">通過</Badge> : <Badge tone="bad">失敗</Badge>}
-        </span>
+    <div
+      className={`space-y-2 rounded border-2 p-3 ${
+        active ? (prod ? "border-red-500 bg-red-50" : "border-green-600 bg-green-50") : "border-gray-200"
+      }`}
+    >
+      <div className="flex items-center justify-between gap-2">
+        <span className="text-base font-medium">{EZPAY_ENV_LABELS[env]}</span>
+        {active ? (
+          <Badge tone={prod ? "bad" : "ok"}>使用中</Badge>
+        ) : (
+          <button
+            type="button"
+            onClick={onSwitch}
+            disabled={switching || !status.configured}
+            className={`rounded px-3 py-1 text-white disabled:cursor-not-allowed disabled:opacity-50 ${
+              prod ? "bg-red-600 hover:bg-red-700" : "bg-green-700 hover:bg-green-800"
+            }`}
+          >
+            {switching ? "切換中…" : `切換到${EZPAY_ENV_LABELS[env]}`}
+          </button>
+        )}
       </div>
-      {status.env === "production" && (
-        <p className="text-red-600">目前連的是正式平台，開立的發票會真的上傳財政部，請小心使用。</p>
-      )}
+      <p className="text-xs text-gray-500">{PLATFORM_HINTS[env]}</p>
+      <p>
+        商店代號：{status.merchantId ?? <span className="text-gray-400">未設定</span>}　金鑰：
+        {status.configured ? <Badge tone="ok">已設定</Badge> : <Badge tone="bad">未設定</Badge>}
+      </p>
       {!status.configured && (
-        <div className="text-red-600">
+        <div className="text-xs text-red-600">
           {status.missing.length > 0 && <p>請在 .env.local 設定：{status.missing.join("、")}，改完後重新啟動伺服器。</p>}
           {status.problems.map((p) => (
             <p key={p}>{p}</p>
           ))}
         </div>
+      )}
+    </div>
+  );
+}
+
+function StatusPanel({
+  status,
+  error,
+  switching,
+  onSwitch,
+}: {
+  status: Status | null;
+  error: string;
+  switching: boolean;
+  onSwitch: (env: EzpayEnv) => void;
+}) {
+  if (!status) return <p className={error ? "text-red-600" : "text-gray-500"}>{error || "讀取設定中…"}</p>;
+  const selfOk = status.selfTest.checkCode.ok && status.selfTest.aes.ok;
+  return (
+    <div className="space-y-3 rounded border border-gray-200 p-3">
+      <div className="grid gap-3 md:grid-cols-2">
+        {(["test", "production"] as const).map((env) => (
+          <PlatformCard
+            key={env}
+            env={env}
+            status={status.platforms[env]}
+            active={status.env === env}
+            switching={switching}
+            onSwitch={() => onSwitch(env)}
+          />
+        ))}
+      </div>
+      <div className="flex flex-wrap items-center gap-x-6 gap-y-1 text-xs text-gray-600">
+        <span>這裡的切換同時套用到繳費機開立發票</span>
+        {status.updatedAt && (
+          <span>
+            上次切換：{new Date(status.updatedAt).toLocaleString("zh-TW", { hour12: false })}
+            {status.updatedBy && `（${status.updatedBy}）`}
+          </span>
+        )}
+        <span>
+          加密自我檢查：{selfOk ? <Badge tone="ok">通過</Badge> : <Badge tone="bad">失敗</Badge>}
+        </span>
+      </div>
+      {error && <p className="text-red-600">{error}</p>}
+      {status.env === "production" && (
+        <p className="font-medium text-red-600">目前使用正式平台：開立的發票會真的上傳財政部，測試請記得作廢。</p>
       )}
     </div>
   );
@@ -443,6 +524,7 @@ function ResultCard({
     <div className="space-y-2 rounded border border-gray-200 p-3">
       <div className="flex flex-wrap items-center gap-2">
         <span className="font-medium">{ACTION_LABELS[entry.action]}</span>
+        {entry.env && <Badge tone={entry.env === "production" ? "bad" : "muted"}>{EZPAY_ENV_LABELS[entry.env]}</Badge>}
         {entry.ok ? <Badge tone="ok">成功</Badge> : <Badge tone="bad">失敗</Badge>}
         {entry.status && <span className="font-mono text-xs">{entry.status}</span>}
         <span className="text-xs text-gray-500">
@@ -513,7 +595,9 @@ export function EinvoiceTest() {
   const [searchMode, setSearchMode] = useState<SearchMode>("invoice");
   const [searchValues, setSearchValues] = useState<SearchValues>({ invoiceNumber: "", randomNum: "", merchantOrderNo: "", totalAmt: "" });
 
-  useEffect(() => {
+  const [switching, setSwitching] = useState(false);
+
+  const loadStatus = () =>
     fetch("/api/einvoice/test")
       .then(async (res) => {
         const json = (await res.json()) as Status & { ok: boolean; error?: string };
@@ -521,7 +605,34 @@ export function EinvoiceTest() {
         setStatus(json);
       })
       .catch((e: unknown) => setStatusError(e instanceof Error ? e.message : "讀取設定失敗"));
+
+  useEffect(() => {
+    loadStatus();
   }, []);
+
+  const switchPlatform = async (env: EzpayEnv) => {
+    const warning =
+      env === "production"
+        ? "切換到正式平台？\n\n切換後這一頁和繳費機開立的發票都會真的上傳財政部，具法律效力。"
+        : "切換到測試平台？\n\n切換後繳費機開立的發票只在測試平台，不會上傳財政部（客人拿到的發票無效）。";
+    if (!confirm(warning)) return;
+    setSwitching(true);
+    setStatusError("");
+    try {
+      const res = await fetch("/api/einvoice/test", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ env }),
+      });
+      const json = (await res.json()) as { ok: boolean; error?: string };
+      if (!json.ok) setStatusError(json.error ?? "切換失敗");
+      await loadStatus();
+    } catch {
+      setStatusError("連不到伺服器");
+    } finally {
+      setSwitching(false);
+    }
+  };
 
   const send = async (body: Record<string, unknown>) => {
     setBusy(true);
@@ -552,13 +663,13 @@ export function EinvoiceTest() {
   };
 
   // 金鑰沒設定好就不能送
-  const locked = !status?.configured;
+  const locked = !status || !status.platforms[status.env].configured || switching;
 
   return (
     <div className="space-y-6 text-sm text-gray-900">
       <div className="space-y-3">
         <h2 className="text-lg font-medium">電子發票測試（ezPay 加值中心）</h2>
-        <StatusPanel status={status} error={statusError} />
+        <StatusPanel status={status} error={statusError} switching={switching} onSwitch={switchPlatform} />
       </div>
 
       <div className="space-y-3 rounded border border-gray-200 p-3">

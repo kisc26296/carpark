@@ -1,6 +1,13 @@
 import "server-only";
 import { ObjectId } from "mongodb";
-import { buildIssueFields, buildSearchFields, callEzpay, getEzpayConfig, newMerchantOrderNo } from "@/lib/einvoice/ezpay";
+import {
+  buildIssueFields,
+  buildSearchFields,
+  callEzpay,
+  getEzpayConfig,
+  newMerchantOrderNo,
+  type EzpayEnv,
+} from "@/lib/einvoice/ezpay";
 import type { KioskInvoice, KioskInvoiceType, PrintedInvoice } from "./kiosk-payment-shared";
 import { addInvoiceNo } from "./parking-entries";
 import { COLLECTIONS, getParkingDb } from "./store";
@@ -17,6 +24,8 @@ export interface KioskInvoiceOrder {
   sessionId: string;
   /** 這筆收款的自訂編號，重試時沿用 */
   merchantOrderNo: string;
+  /** 繳費完成時使用的平台；中途切換平台，重試仍送到同一個平台 */
+  env: EzpayEnv;
   totalAmt: number;
   itemName: string;
   entryId: string | null;
@@ -30,10 +39,10 @@ export interface KioskInvoiceChoice {
   buyerUBN?: string;
 }
 
-/** 沒設定 ezPay 金鑰時回傳原因，有設定回傳 null */
-export function invoiceUnavailableReason(): string | null {
-  const { config } = getEzpayConfig();
-  return config ? null : "電子發票尚未設定";
+/** 目前使用的平台；金鑰沒設定好時回傳原因 */
+export async function currentInvoicePlatform(): Promise<{ env: EzpayEnv } | { reason: string }> {
+  const { config } = await getEzpayConfig();
+  return config ? { env: config.env } : { reason: "電子發票尚未設定" };
 }
 
 export const newKioskOrderNo = () => newMerchantOrderNo().replace(/^T/, "K");
@@ -99,6 +108,7 @@ export async function issueKioskInvoice(
     entryId: order.entryId && ObjectId.isValid(order.entryId) ? new ObjectId(order.entryId) : null,
     plate: order.plate,
     chargeCode: order.chargeCode,
+    env: order.env,
   };
 
   try {
@@ -115,11 +125,15 @@ export async function issueKioskInvoice(
     // 重試：上一次可能其實開立成功了（回應逾時、連線中斷），先查詢
     let result: Record<string, unknown> | null = null;
     if (retry) {
-      const found = await callEzpay("search", buildSearchFields({ merchantOrderNo: order.merchantOrderNo, totalAmt: order.totalAmt }));
+      const found = await callEzpay(
+        "search",
+        buildSearchFields({ merchantOrderNo: order.merchantOrderNo, totalAmt: order.totalAmt }),
+        order.env,
+      );
       if (found.status === "SUCCESS" && found.result?.InvoiceNumber) result = found.result;
     }
     if (!result) {
-      const issued = await callEzpay("issue", fields);
+      const issued = await callEzpay("issue", fields, order.env);
       if (issued.status !== "SUCCESS" || !issued.result?.InvoiceNumber) {
         throw new Error(`${issued.message ?? "開立失敗"}${issued.status ? `（${issued.status}）` : ""}`);
       }
@@ -153,7 +167,6 @@ export async function issueKioskInvoice(
       barCode: print?.barCode ?? null,
       qrCodeL: print?.qrCodeL ?? null,
       qrCodeR: print?.qrCodeR ?? null,
-      env: getEzpayConfig().config?.env ?? null,
     });
     if (order.entryId) {
       await addInvoiceNo(order.entryId, invoiceNumber).catch((error) =>
