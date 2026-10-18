@@ -1,7 +1,8 @@
 import "server-only";
 import { MongoServerError } from "mongodb";
 import { saveCaptureImage } from "./image-storage";
-import { getCameraRole, ingestPlateResult } from "./parking-entries";
+import { submitGateReading } from "./gate-verification";
+import { getCameraRole, ingestPlateResult, readPlateResult } from "./parking-entries";
 import type { MqttEnvelope } from "./protocol";
 import { emitPlateResult } from "./result-events";
 import { COLLECTIONS, getParkingDb } from "./store";
@@ -9,6 +10,9 @@ import { COLLECTIONS, getParkingDb } from "./store";
 // 依規格第 8 節「建議後端資料模型」保存辨識結果
 
 type Data = Record<string, unknown>;
+
+/** 入口 / 出口攝影機的這幾種即時結果要先連續觸發辨識確認車號；離線補傳（OfflineResult）的車早就通過了，直接記錄 */
+const VERIFY_COMMANDS = new Set(["Result", "HttpResult"]);
 
 const str = (v: unknown) => (typeof v === "string" ? v : v == null ? "" : String(v));
 const num = (v: unknown) => (typeof v === "number" ? v : v == null || v === "" ? null : Number(v));
@@ -41,7 +45,9 @@ async function insertResult(doc: Data): Promise<SaveResultOutcome> {
     });
     // 依攝影機是入口或出口建立進場紀錄 / 設定出場；失敗只記 log，不影響辨識結果本身已存檔
     try {
-      const outcome = await ingestPlateResult(doc, id);
+      const sn = String(doc.device_sn ?? "");
+      const role = sn && VERIFY_COMMANDS.has(String(doc.command)) ? await getCameraRole(sn) : null;
+      const outcome = role ? submitGateReading(sn, role, readPlateResult(doc, id)) : await ingestPlateResult(doc, id);
       if (outcome.action !== "skipped") console.log(`[entries] ${doc.device_sn} ${doc.plate_raw}:`, outcome);
     } catch (error) {
       console.error("[entries] 進出場紀錄處理失敗:", error instanceof Error ? error.message : error);

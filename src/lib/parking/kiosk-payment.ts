@@ -5,25 +5,39 @@ import { getBillState, runBillAction } from "@/lib/cash-device/protocols/bill-ac
 import { getCoinState, runCoinAction } from "@/lib/cash-device/protocols/coin-acceptor";
 import { getHopperState, runHopperAction } from "@/lib/cash-device/protocols/hopper";
 import { HOPPER_COIN_VALUES, type HopperDeviceId } from "@/lib/cash-device/shared";
+import { isValidUbn } from "@/lib/einvoice/ezpay-shared";
 import {
+  CARRIER_PATTERN,
+  KIOSK_INVOICE_CHOICE_MS,
   KIOSK_PAYMENT_TIMEOUT_MS,
+  type KioskInvoiceType,
   type KioskMonthlyInfo,
   type KioskPaymentSession,
   type KioskPaymentTarget,
 } from "./kiosk-payment-shared";
+import { computeExitCharge } from "./exit-charge";
+import {
+  invoiceUnavailableReason,
+  issueKioskInvoice,
+  newKioskOrderNo,
+  type KioskInvoiceChoice,
+  type KioskInvoiceOrder,
+} from "./kiosk-invoice";
 import { findMonthlyRentalByPlate } from "./monthly-rental";
 import type { MonthlyRental } from "./monthly-rental-shared";
 import { getInsideEntry, markPaid } from "./parking-entries";
-import { calculateFee } from "./rate-shared";
 import { getRateSettings } from "./rate-settings";
 
 // 繳費機收款流程（一台繳費機同時只有一筆收款）：
 // 1. 開始收款時啟用紙鈔機與硬幣接收器，倒數 180 秒
 // 2. 紙鈔機或硬幣接收器的累計金額（total）增加就算偵測到投錢，加進已投金額並重新倒數；
 //    紙鈔機在 Escrow 模式等待確認時自動收下
-// 月租車：有效期間內無須繳費；已逾期從到期日隔天 00:00 起算臨停費（見 checkMonthly）
+// 應繳金額見 exit-charge.ts：月租車有效期間內、進場緩衝內、繳費後離場結帳緩衝內免費；超過離場結帳緩衝要補繳，
+// 補繳上限為收費上限減已結帳金額。月租車已逾期從到期日隔天 00:00 起算臨停費（見 checkMonthly）
 // 3. 已投金額達到應繳金額 → 停用收款、找零、記錄繳費；倒數結束或按取消 → 停用收款、退還已投金額
 // 倒數在伺服器計時，繳費機頁面關掉也會照常退幣。
+// 4. 繳費完成且有收錢：等客人選發票開立方式（見 kiosk-invoice.ts）。繳費機頁面倒數結束會自動直接列印；
+//    頁面關掉或下一筆收款開始時，伺服器直接開立（B2C 紙本，可在 ezPay 平台補印），確保每筆收款都有開發票。
 
 export class KioskPaymentError extends Error {
   constructor(
@@ -37,7 +51,17 @@ export class KioskPaymentError extends Error {
 interface Session extends Omit<KioskPaymentSession, "remainingMs"> {
   deadline: number;
   timer: ReturnType<typeof setTimeout> | null;
+  /** 要開立發票時才有 */
+  invoiceOrder: KioskInvoiceOrder | null;
+  invoiceAttempts: number;
+  invoiceTimer: ReturnType<typeof setTimeout> | null;
 }
+
+// 繳費機頁面沒有回應時，伺服器等多久自動開立發票（比頁面上的倒數多一點，讓頁面先處理）
+const INVOICE_FALLBACK_MS = KIOSK_INVOICE_CHOICE_MS + 60_000;
+// 開立失敗時（例如網路暫時不通）伺服器自動重試，最多總共開立幾次
+const INVOICE_MAX_ATTEMPTS = 3;
+const INVOICE_RETRY_MS = 60_000;
 
 interface Runtime {
   session: Session | null;
@@ -56,8 +80,11 @@ function getRuntime(): Runtime {
 }
 
 function toPublic(s: Session): KioskPaymentSession {
-  const { deadline, timer, ...rest } = s;
+  const { deadline, timer, invoiceOrder, invoiceAttempts, invoiceTimer, ...rest } = s;
   void timer;
+  void invoiceOrder;
+  void invoiceAttempts;
+  void invoiceTimer;
   return { ...rest, remainingMs: s.status === "collecting" ? Math.max(0, deadline - Date.now()) : 0 };
 }
 
@@ -190,12 +217,66 @@ async function finish(s: Session, outcome: NonNullable<Session["outcome"]>): Pro
       addMessage(s, `${outcome === "paid" ? "找零" : "退幣"}不足 ${s.toReturn - s.returned} 元，請洽管理人員`);
     }
   }
-  if (outcome === "paid" && s.target.kind === "entry") {
+  // 免費（緩衝時間內、月租車、已達收費上限）不改繳費紀錄，以免把繳費時間往後推
+  if (outcome === "paid" && s.target.kind === "entry" && s.due > 0) {
     await markPaid(s.target.entryId, s.due).catch((error) =>
       addMessage(s, `繳費紀錄寫入失敗：${error instanceof Error ? error.message : "未知錯誤"}`),
     );
   }
+  if (outcome === "paid" && s.due > 0) prepareInvoice(s);
   s.status = "done";
+}
+
+// ---- 電子發票 ----
+
+function prepareInvoice(s: Session): void {
+  const reason = invoiceUnavailableReason();
+  if (reason) {
+    s.invoice = { status: "unavailable", reason };
+    return;
+  }
+  s.invoiceOrder = {
+    sessionId: s.id,
+    merchantOrderNo: newKioskOrderNo(),
+    totalAmt: s.due,
+    itemName: "停車費",
+    entryId: s.target.kind === "entry" ? s.target.entryId : null,
+    plate: s.target.kind === "entry" ? s.target.plate : null,
+    chargeCode: s.target.kind === "charge" ? s.target.code : null,
+  };
+  s.invoice = { status: "pending" };
+  s.invoiceTimer = setTimeout(() => void issueFor(s, { type: "print" }), INVOICE_FALLBACK_MS);
+}
+
+/** 開立發票；已在開立中或已開立就不重複 */
+async function issueFor(s: Session, choice: KioskInvoiceChoice): Promise<void> {
+  if (!s.invoiceOrder || (s.invoice?.status !== "pending" && s.invoice?.status !== "failed")) return;
+  if (s.invoiceTimer) clearTimeout(s.invoiceTimer);
+  s.invoiceTimer = null;
+  s.invoice = { status: "issuing", type: choice.type };
+  const retry = s.invoiceAttempts > 0;
+  s.invoiceAttempts++;
+  s.invoice = await issueKioskInvoice(s.invoiceOrder, choice, retry);
+  if (s.invoice.status === "failed" && s.invoiceAttempts < INVOICE_MAX_ATTEMPTS) {
+    s.invoiceTimer = setTimeout(() => void issueFor(s, choice), INVOICE_RETRY_MS);
+  }
+}
+
+/** 繳費機選擇發票開立方式（重試也用這個）；等開立完成才回傳 */
+export async function chooseInvoice(
+  id: unknown,
+  input: { type?: unknown; carrierNum?: unknown; buyerUBN?: unknown },
+): Promise<KioskPaymentSession> {
+  const s = findSession(id);
+  if (!s.invoice || s.invoice.status === "unavailable") throw new KioskPaymentError("這筆收款不需要開立發票", 400);
+  const type = input.type as KioskInvoiceType;
+  if (type !== "print" && type !== "carrier" && type !== "ubn") throw new KioskPaymentError("發票開立方式錯誤", 400);
+  const carrierNum = typeof input.carrierNum === "string" ? input.carrierNum.trim().toUpperCase() : "";
+  const buyerUBN = typeof input.buyerUBN === "string" ? input.buyerUBN.trim() : "";
+  if (type === "carrier" && !CARRIER_PATTERN.test(carrierNum)) throw new KioskPaymentError("手機條碼格式錯誤", 400);
+  if (type === "ubn" && !isValidUbn(buyerUBN)) throw new KioskPaymentError("統一編號錯誤", 400);
+  await issueFor(s, { type, carrierNum, buyerUBN });
+  return toPublic(s);
 }
 
 /** YYYY-MM-DD 當天 00:00（本地時間），addDays 往後推幾天 */
@@ -205,7 +286,7 @@ const localDate = (ymd: string, addDays = 0) => {
 };
 
 /** 判斷月租車在 now 時的狀態；不是月租車回傳 null */
-function checkMonthly(rental: MonthlyRental | null, entryTime: Date, now: Date): KioskMonthlyInfo | null {
+export function checkMonthly(rental: MonthlyRental | null, entryTime: Date, now: Date): KioskMonthlyInfo | null {
   if (!rental) return null;
   const base = { no: rental.no, name: rental.name, startDate: rental.startDate, endDate: rental.endDate };
   const fromEntry = entryTime.toISOString();
@@ -229,13 +310,9 @@ export async function startPayment(input: { entryId?: unknown; code?: unknown })
     const entryTime = new Date(entry.entryTime);
     const monthly = checkMonthly(await findMonthlyRentalByPlate(entry.plate), entryTime, now);
     const minutes = Math.max(0, Math.ceil((now.getTime() - entryTime.getTime()) / 60000));
-    target = { kind: "entry", entryId: entry.id, plate: entry.plate, entryTime: entry.entryTime, minutes, monthly };
-    if (monthly?.status === "valid") due = 0;
-    else {
-      // 逾期的月租車從到期日隔天開始算，其他照進場時間算
-      const from = monthly?.chargeFrom ? new Date(monthly.chargeFrom) : entryTime;
-      due = from < now ? calculateFee(settings, from, now).total : 0;
-    }
+    const charge = computeExitCharge(settings, entry, monthly, now);
+    target = { kind: "entry", entryId: entry.id, plate: entry.plate, entryTime: entry.entryTime, minutes, monthly, charge };
+    due = charge.due;
   } else {
     const code = typeof input.code === "string" ? input.code : "";
     const charge = settings.singleCharges.find((c) => c.code === code);
@@ -247,6 +324,8 @@ export async function startPayment(input: { entryId?: unknown; code?: unknown })
   // 上一筆還沒結束（例如頁面重新整理）先當作取消，已投的錢退還
   const rt = getRuntime();
   if (rt.session?.status === "collecting") await finish(rt.session, "cancelled");
+  // 上一位客人還沒選發票開立方式就換下一筆：直接開立（不等）；開立失敗等待重試的照原本的計時器重試
+  if (rt.session?.invoice?.status === "pending") void issueFor(rt.session, { type: "print" });
 
   ensureListener();
   const [bill, coin] = await Promise.all([getBillState(), getCoinState()]);
@@ -265,12 +344,16 @@ export async function startPayment(input: { entryId?: unknown; code?: unknown })
     coins: [],
     message: null,
     paymentMethods: settings.paymentMethods,
+    invoice: null,
     deadline: 0,
     timer: null,
+    invoiceOrder: null,
+    invoiceAttempts: 0,
+    invoiceTimer: null,
   };
   rt.session = s;
   if (due <= 0) {
-    // 免費（例如在進場緩衝時間內）直接完成
+    // 免費（緩衝時間內、月租車、已達收費上限）直接完成
     await finish(s, "paid");
   } else {
     restartCountdown(s);

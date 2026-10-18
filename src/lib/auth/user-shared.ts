@@ -31,10 +31,13 @@ export interface PublicUser {
   updatedAt: string | null;
 }
 
-/** 使用者是否可以使用某個功能（"users" = 使用者設定，只限管理者） */
-export function hasPermission(user: Pick<PublicUser, "role" | "permissions">, key: Permission | "users"): boolean {
+/** 只限管理者的功能：使用者設定、電子發票測試 */
+export type AdminOnly = "users" | "einvoice";
+
+/** 使用者是否可以使用某個功能（AdminOnly 的功能只限管理者） */
+export function hasPermission(user: Pick<PublicUser, "role" | "permissions">, key: Permission | AdminOnly): boolean {
   if (user.role === "admin") return true;
-  return key !== "users" && user.permissions.includes(key);
+  return key !== "users" && key !== "einvoice" && user.permissions.includes(key);
 }
 
 export const USERNAME_PATTERN = /^[A-Za-z0-9_.@-]{3,32}$/;

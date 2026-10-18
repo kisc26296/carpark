@@ -1,13 +1,15 @@
-import { encodeLineMessage } from "@/lib/parking/led-protocol";
+import { encodeCancelTemporary, encodeLineMessage } from "@/lib/parking/led-protocol";
 import { sendCommand } from "@/lib/parking/mqtt-platform";
 
 // 下發 LED 點陣顯示板訊息（透過 SerialData 轉送 RS485 位元組）
 // body: { sn, address?, lines: string[4], colors?: (1|2|3)[4], color?: 1|2|3, mode: "fixed"|"temporary", durationSec?, timeoutMs? }
 // 每一行各自組成一個獨立的 RS485 命令帧（0x25 固定顯示 / 0x27 臨時訊息），依序下發，每行可各自指定顏色。
 // colors 省略時，缺的行退回 color（整體預設色，未給則紅）。
+// 清除臨時訊息：body: { sn, address?, action: "cancelTemporary", lines?: number[] }（0x21，lines 省略為 1～4 行全部）
 export async function POST(request: Request) {
   let body: {
     sn?: unknown;
+    action?: unknown;
     address?: unknown;
     lines?: unknown;
     colors?: unknown;
@@ -37,6 +39,23 @@ export async function POST(request: Request) {
   const durationSec = mode === "temporary" ? Math.min(255, Math.max(1, Number(body.durationSec) || 10)) : undefined;
   const address = Number.isFinite(Number(body.address)) && body.address !== undefined ? Number(body.address) : undefined;
   const timeoutMs = Math.min(Math.max(Number(body.timeoutMs) || 5000, 500), 30000);
+
+  if (body.action === "cancelTemporary") {
+    const cancelLines = Array.isArray(body.lines) ? body.lines.map(Number) : [1, 2, 3, 4];
+    const encoded = encodeCancelTemporary(cancelLines, address);
+    try {
+      const sendResult = await sendCommand(
+        sn,
+        "SerialData",
+        { serialData: [{ channel: 0, data: encoded.base64, len: encoded.frameBytes }] },
+        timeoutMs,
+      );
+      const ok = sendResult.status === "success" || sendResult.status === "sent";
+      return Response.json({ ok, status: sendResult.status, hex: encoded.hex });
+    } catch (error) {
+      return Response.json({ ok: false, error: error instanceof Error ? error.message : "傳送失敗" }, { status: 500 });
+    }
+  }
 
   const results = [];
 

@@ -8,6 +8,14 @@ export async function register() {
       console.error("[mqtt] 啟動失敗:", error instanceof Error ? error.message : error);
     }
 
+    // 顯示板：依剩餘車位數切換「有剩餘車位 / 無剩餘車位」的固定顯示
+    try {
+      const { startDisplayBoardSync } = await import("@/lib/parking/display-board");
+      startDisplayBoardSync();
+    } catch (error) {
+      console.error("[display-board] 啟動失敗:", error instanceof Error ? error.message : error);
+    }
+
     // 收找零紀錄：找零錢機出幣、紙鈔機收鈔時自動增減數量（要在設備連線前開始訂閱）
     try {
       const { startCashInventoryTracking } = await import("@/lib/parking/cash-inventory");

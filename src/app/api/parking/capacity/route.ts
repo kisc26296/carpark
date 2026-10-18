@@ -1,3 +1,4 @@
+import { requestDisplaySync } from "@/lib/parking/display-board";
 import { GateCapacityError, getCapacity, saveCapacity } from "@/lib/parking/gate-capacity";
 
 export const dynamic = "force-dynamic";
@@ -22,7 +23,10 @@ export async function PUT(request: Request) {
     return Response.json({ ok: false, error: "body 不是合法的 JSON" }, { status: 400 });
   }
   try {
-    return Response.json({ ok: true, capacity: await saveCapacity(body) });
+    const capacity = await saveCapacity(body);
+    // 車位數改了，顯示板跟著切換有無車位的訊息
+    requestDisplaySync();
+    return Response.json({ ok: true, capacity });
   } catch (error) {
     const status = error instanceof GateCapacityError ? error.status : 500;
     return Response.json({ ok: false, error: error instanceof Error ? error.message : "儲存失敗" }, { status });

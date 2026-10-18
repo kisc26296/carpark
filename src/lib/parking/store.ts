@@ -25,6 +25,10 @@ export const COLLECTIONS = {
   cashInventoryLogs: "cash_inventory_logs",
   /** 登入使用者帳號（密碼雜湊、角色與功能權限），帳號不可重複 */
   users: "user",
+  /** 進出口辨識確認：每次連續觸發辨識的結果、是否開閘與原因 */
+  gateVerifications: "gate_verifications",
+  /** 繳費機開立的電子發票（ezPay），開立失敗也會記錄 */
+  invoices: "invoices",
 } as const;
 
 export type CommandStatus = "pending" | "success" | "failed" | "timeout" | "sent";
@@ -51,6 +55,9 @@ async function ensureIndexes(db: Db): Promise<void> {
     db.collection(COLLECTIONS.parkingEntries).createIndex({ plate: 1, exited: 1, entryTime: -1 }),
     db.collection(COLLECTIONS.parkingEntries).createIndex({ entryTime: -1 }),
     db.collection(COLLECTIONS.cashInventoryLogs).createIndex({ time: -1 }),
+    db.collection(COLLECTIONS.gateVerifications).createIndex({ startedAt: -1 }),
+    db.collection(COLLECTIONS.invoices).createIndex({ createdAt: -1 }),
+    db.collection(COLLECTIONS.invoices).createIndex({ invoiceNumber: 1 }),
     // user 集合裡可能有沒有帳號的其他資料，只對有帳號的文件要求不重複
     db
       .collection(COLLECTIONS.users)

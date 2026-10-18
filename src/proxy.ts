@@ -13,6 +13,7 @@ const PUBLIC_PATHS = [
   "/parking-payment-kiosk",
   "/api/parking/kiosk-query",
   "/api/parking/kiosk-payment",
+  "/api/parking/kiosk-invoice",
   "/api/parking/http/result",
 ];
 // 只開放讀取（GET）：繳費機要顯示的車輛照片、影片與停車場名稱；修改設定仍要登入

@@ -4,10 +4,12 @@ import { ObjectId, type Filter, type WithId } from "mongodb";
 import { normalizePlate } from "./monthly-rental-shared";
 import type { CameraInfo, CameraRole, ParkingEntry } from "./parking-entry-shared";
 import { COLLECTIONS, getParkingDb } from "./store";
-import { checkTaiwanPlate } from "./tw-plate";
+import { checkTaiwanPlate, type PlateCheck } from "./tw-plate";
 
 // 車輛進出場紀錄（carpark.parking_entries）。
-// 攝影機辨識結果存檔後會呼叫 ingestPlateResult：入口攝影機新增進場紀錄、出口攝影機把場內紀錄設為已出場；
+// 入口 / 出口攝影機的即時辨識先交給 gate-verification.ts 連續觸發辨識確認車號，
+// 通過才開閘並呼叫 recordAutoEntry 新增進場紀錄 / recordAutoExit 設為已出場。
+// 離線補傳的辨識結果（車早就通過了）由 ingestPlateResult 直接記錄。
 // 攝影機是入口或出口記在 devices 的 role 欄位，在進場紀錄頁指定。
 
 // 同一車牌在入口重複被辨識（車停在柵欄前、設備重送）時，這段時間內只算一次進場
@@ -126,49 +128,97 @@ function eventTime(triggerTime: unknown, fallback: unknown): Date {
 
 export type IngestOutcome =
   | { action: "skipped"; reason: string }
+  | { action: "verifying" }
   | { action: "entered"; no: number; plate: string; corrected: string | null; closedPrevious: number | null }
   | { action: "repeat"; no: number }
   | { action: "exited"; no: number }
   | { action: "no-open-entry" };
 
-/** 辨識結果存檔後呼叫：依攝影機角色建立進場紀錄或設定出場 */
-export async function ingestPlateResult(result: Record<string, unknown>, resultId: string): Promise<IngestOutcome> {
-  if (!INGEST_COMMANDS.has(String(result.command))) return { action: "skipped", reason: "不是進出場辨識結果" };
-  if (result.is_car_exist === "car-free") return { action: "skipped", reason: "無車" };
-  const check = checkTaiwanPlate(String(result.plate_raw ?? ""));
-  if (INVALID_PLATES.has(check.original)) return { action: "skipped", reason: "沒有辨識到車牌" };
+export interface PlateReading {
+  /** 依台灣車牌格式檢查 / 修正後的車號 */
+  check: PlateCheck;
+  sn: string;
+  command: string;
+  time: Date;
+  resultId: string;
+  imagePath: string | null;
+}
+
+/** 從辨識結果取出進出場需要的資料；沒有車牌、不是進出場結果時回傳略過原因 */
+export function readPlateResult(
+  result: Record<string, unknown>,
+  resultId: string,
+): { ok: true; reading: PlateReading } | { ok: false; reason: string } {
+  const command = String(result.command);
+  if (!INGEST_COMMANDS.has(command)) return { ok: false, reason: "不是進出場辨識結果" };
+  if (result.is_car_exist === "car-free") return { ok: false, reason: "無車" };
   // 攝影機認錯的字依台灣車牌格式修正；出口也要修正，才對得到入口修正後的紀錄
+  const check = checkTaiwanPlate(String(result.plate_raw ?? ""));
+  if (INVALID_PLATES.has(check.original)) return { ok: false, reason: "沒有辨識到車牌" };
+  return {
+    ok: true,
+    reading: {
+      check,
+      sn: String(result.device_sn ?? ""),
+      command,
+      time: eventTime(result.trigger_time, result.created_at),
+      resultId,
+      imagePath: typeof result.image_saved_path === "string" ? result.image_saved_path : null,
+    },
+  };
+}
+
+/** 離線補傳的辨識結果直接記錄進場 / 出場（即時結果由 gate-verification.ts 確認後才記錄） */
+export async function ingestPlateResult(result: Record<string, unknown>, resultId: string): Promise<IngestOutcome> {
+  const parsed = readPlateResult(result, resultId);
+  if (!parsed.ok) return { action: "skipped", reason: parsed.reason };
+  const { check, sn } = parsed.reading;
   const plate = check.plate;
 
-  const sn = String(result.device_sn ?? "");
   const role = sn ? await getCameraRole(sn) : null;
   if (!role) return { action: "skipped", reason: "攝影機未指定入口或出口" };
+  if (role === "entry") return recordAutoEntry(parsed.reading);
 
-  const time = eventTime(result.trigger_time, result.created_at);
-  const imagePath = typeof result.image_saved_path === "string" ? result.image_saved_path : null;
-  const col = await entries();
   // 出口找不到修正後的車號時，再用攝影機原始車號找一次（例如入場時沒修正、出場時修正了）
-  const open =
-    (await findOpenEntry(plate)) ?? (check.corrected && role === "exit" ? await findOpenEntry(check.original) : null);
+  const open = await findInsideEntry(check.corrected ? [plate, check.original] : [plate]);
+  if (!open) return { action: "no-open-entry" };
+  return recordAutoExit(open.id, parsed.reading);
+}
 
-  if (role === "exit") {
-    if (!open) return { action: "no-open-entry" };
-    await col.updateOne(
-      { _id: open._id },
-      {
-        $set: {
-          exited: true,
-          exitTime: time,
-          exitDeviceSn: sn,
-          exitResultId: resultId,
-          exitImagePath: imagePath,
-          updatedAt: new Date(),
-        },
-      },
-    );
-    return { action: "exited", no: open.no };
+/** 依序用這些車號找場內（未出場）最新的紀錄，找到第一筆就回傳 */
+export async function findInsideEntry(plates: string[]): Promise<ParkingEntry | null> {
+  for (const plate of [...new Set(plates.filter(Boolean))]) {
+    const doc = await findOpenEntry(plate);
+    if (doc) return toEntry(doc);
   }
+  return null;
+}
 
+/** 出口把場內紀錄設為已出場 */
+export async function recordAutoExit(id: string, reading: PlateReading): Promise<IngestOutcome> {
+  const col = await entries();
+  const doc = await col.findOneAndUpdate(
+    { _id: new ObjectId(id), exited: false },
+    {
+      $set: {
+        exited: true,
+        exitTime: reading.time,
+        exitDeviceSn: reading.sn,
+        exitResultId: reading.resultId,
+        exitImagePath: reading.imagePath,
+        updatedAt: new Date(),
+      },
+    },
+  );
+  return doc ? { action: "exited", no: doc.no } : { action: "no-open-entry" };
+}
+
+/** 入口新增進場紀錄（同一車號短時間內重複只算一次；場內有舊紀錄先結束） */
+export async function recordAutoEntry(reading: PlateReading): Promise<IngestOutcome> {
+  const { check, sn, time, resultId, imagePath } = reading;
+  const plate = check.plate;
+  const col = await entries();
+  const open = await findOpenEntry(plate);
   if (open && Math.abs(time.getTime() - open.entryTime.getTime()) < REPEAT_ENTRY_MS) {
     return { action: "repeat", no: open.no };
   }
@@ -243,8 +293,34 @@ export async function getInsideEntry(id: unknown): Promise<ParkingEntry> {
   return toEntry(doc);
 }
 
-/** 繳費機收款完成後記錄繳費時間與金額 */
-export const markPaid = (id: unknown, amount: number) => updateEntry(id, { payTime: new Date(), amount });
+/** 記錄繳費：繳費時間設為現在，金額加到已結帳金額（補繳會累加） */
+export async function markPaid(id: unknown, amount: number): Promise<void> {
+  const _id = toObjectId(id);
+  const now = new Date();
+  const res = await (await entries()).updateOne({ _id }, [
+    { $set: { payTime: now, amount: { $add: [{ $ifNull: ["$amount", 0] }, amount] }, updatedAt: now } },
+  ]);
+  if (res.matchedCount === 0) throw new ParkingEntryError("找不到這筆進場紀錄", 404);
+}
+
+/** 記錄開立的發票號碼；補繳又開一張時用逗號接在後面 */
+export async function addInvoiceNo(id: unknown, invoiceNumber: string): Promise<void> {
+  const now = new Date();
+  await (await entries()).updateOne({ _id: toObjectId(id) }, [
+    {
+      $set: {
+        invoiceNo: {
+          $cond: [
+            { $gt: [{ $strLenCP: { $ifNull: ["$invoiceNo", ""] } }, 0] },
+            { $concat: ["$invoiceNo", ",", invoiceNumber] },
+            invoiceNumber,
+          ],
+        },
+        updatedAt: now,
+      },
+    },
+  ]);
+}
 
 function parseTime(value: unknown, label: string): Date {
   const d = typeof value === "string" && value ? new Date(value) : null;

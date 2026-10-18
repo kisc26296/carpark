@@ -36,6 +36,8 @@ interface DeviceState {
   io: [number, number];
   serialConfig: Data;
   imageType: number;
+  /** 最後一次上傳的辨識車號；軟觸發時用同一個車號，模擬車還停在攝影機前 */
+  lastPlate: string;
 }
 
 export interface SimulatorInfo {
@@ -57,6 +59,7 @@ class SimulatedDevice {
     io: [0, 0],
     serialConfig: { channel: 0, baudRate: 19200, parity: 0, stop: 1, databits: 8 },
     imageType: 0,
+    lastPlate: "SIM-0001",
   };
   private readonly ready: Promise<void>;
   private readonly loginServer: net.Server;
@@ -132,6 +135,7 @@ class SimulatedDevice {
   async publishUplink(command: string, data: Data | null): Promise<MqttEnvelope> {
     const payload = data ? { ...data } : null;
     if (payload && PLATE_RESULT_COMMANDS.has(command)) {
+      if (typeof payload.carNO === "string" && payload.carNO) this.state.lastPlate = payload.carNO;
       if ("guid" in payload && !payload.guid) payload.guid = randomUUID();
       if ("triggT" in payload && !payload.triggT) payload.triggT = formatTime();
       if ("imgT" in payload && !payload.imgT) payload.imgT = formatCompactTime();
@@ -240,7 +244,7 @@ class SimulatedDevice {
         setTimeout(() => {
           this.publishUplink("Result", {
             IsCarExist: "Motor Vehicle",
-            carNO: "SIM-0001",
+            carNO: s.lastPlate,
             carNOC: "",
             confid: 900,
             coordinate: "(18,85,32,94)",

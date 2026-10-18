@@ -4,8 +4,9 @@ import { useEffect, useState, type ReactNode } from "react";
 import { hasPermission, ROLE_LABELS, type PublicUser } from "@/lib/auth/user-shared";
 import { ChangeRecordForm } from "./change-record";
 import { DatabaseSettings } from "./database-settings";
+import { DisplayBoardSettings } from "./display-board";
+import { EinvoiceTest } from "./einvoice-test";
 import { EntryRecords } from "./entry-records";
-import { GateAndCapacity } from "./gate-capacity";
 import { RefundForm } from "./hopper-refund";
 import { MonthlySettings } from "./monthly-settings";
 import { RateSettings } from "./rate-settings";
@@ -13,7 +14,7 @@ import { UserSettings } from "./user-settings";
 
 // 停車場管理首頁：左側選單 + 右側設定內容。按鈕功能尚未實作，之後再補。
 
-type MenuKey = "database" | "rate" | "device" | "entry" | "shift" | "report" | "monthly" | "users";
+type MenuKey = "database" | "rate" | "device" | "entry" | "shift" | "report" | "monthly" | "users" | "einvoice";
 
 const icon = (path: ReactNode) => (
   <svg viewBox="0 0 24 24" className="h-4 w-4 shrink-0" fill="currentColor" aria-hidden>
@@ -62,56 +63,12 @@ const MENU: { key: MenuKey; label: string; icon: ReactNode }[] = [
     label: "使用者設定",
     icon: icon(<path d="M3 3h5v5H3zm6.5 0h5v5h-5zM16 3h5v5h-5zM3 9.5h5v5H3zm6.5 0h5v5h-5zm6.5 0h5v5h-5zM3 16h5v5H3zm6.5 0h5v5h-5zm6.5 0h5v5h-5z" />),
   },
+  {
+    key: "einvoice",
+    label: "電子發票測試",
+    icon: icon(<path d="M5 2h14v20l-3-2-2 2-2-2-2 2-2-2-3 2zm3 5v2h8V7zm0 4v2h8v-2zm0 4v2h5v-2z" />),
+  },
 ];
-
-// 標題 + 輸入框一列：手機上下排、電腦左右排，皆靠左對齊
-function Field({ label, defaultValue, type = "text" }: { label: string; defaultValue: string; type?: string }) {
-  return (
-    <label className="flex flex-col gap-1 sm:flex-row sm:items-center sm:gap-3">
-      <span className="font-medium sm:w-36 sm:shrink-0">{label}</span>
-      <input type={type} defaultValue={defaultValue} className="w-full max-w-md rounded border border-gray-300 px-3 py-2" />
-    </label>
-  );
-}
-
-const buttonClass = "rounded bg-sky-400 px-4 py-2 text-lg text-white hover:bg-sky-500";
-
-// TODO: 出入口設備 IP / 帳號的「確定修改」之後再實作；開閘與車位數用 GateAndCapacity（和進場紀錄頁共用）
-function DeviceSettings() {
-  return (
-    <div className="space-y-5">
-      <form className="space-y-5 text-sm text-gray-900" onSubmit={(e) => e.preventDefault()}>
-        <div>
-          <div className="text-xs text-gray-700">出入口設備</div>
-          <div className="mt-2 space-y-3">
-            <Field label="入口IP:" defaultValue="192.168.1.100" />
-            <Field label="入口PORT:" defaultValue="80" />
-            <Field label="入口登入帳號:" defaultValue="admin" />
-            <Field label="入口登入密碼:" defaultValue="admin" type="password" />
-          </div>
-        </div>
-
-        <hr className="border-gray-200" />
-
-        <div className="space-y-3">
-          <Field label="出口IP:" defaultValue="192.168.1.101" />
-          <Field label="出口PORT:" defaultValue="80" />
-          <Field label="出口登入帳號:" defaultValue="admin" />
-          <Field label="出口登入密碼:" defaultValue="admin" type="password" />
-        </div>
-
-        <hr className="border-gray-200" />
-        <button type="submit" className={buttonClass}>
-          確定修改
-        </button>
-      </form>
-
-      {/* 開閘與車位數有自己的表單，放在上面的 form 外面（form 不能巢狀） */}
-      <hr className="border-gray-200" />
-      <GateAndCapacity />
-    </div>
-  );
-}
 
 const grayButtonClass = "rounded border border-gray-300 bg-gray-100 px-3 py-1.5 text-sm hover:bg-gray-200";
 
@@ -320,7 +277,7 @@ export default function Home() {
         ) : shown === "rate" ? (
           <RateSettings />
         ) : shown === "device" ? (
-          <DeviceSettings />
+          <DisplayBoardSettings />
         ) : shown === "entry" ? (
           <EntryRecords />
         ) : shown === "monthly" ? (
@@ -329,6 +286,8 @@ export default function Home() {
           <ShiftHandover />
         ) : shown === "users" ? (
           <UserSettings currentUserId={user.id} />
+        ) : shown === "einvoice" ? (
+          <EinvoiceTest />
         ) : (
           <Placeholder title={current.label} />
         )}

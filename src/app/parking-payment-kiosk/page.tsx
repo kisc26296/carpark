@@ -5,6 +5,7 @@ import type { KioskMonthlyInfo, KioskPaymentSession } from "@/lib/parking/kiosk-
 import type { KioskVideoPlayer } from "@/lib/parking/kiosk-video-shared";
 import { formatDateTime } from "@/lib/parking/parking-entry-shared";
 import { PAYMENT_METHODS, type PaymentMethod } from "@/lib/parking/rate-shared";
+import { InvoiceStep } from "./invoice-step";
 import { useKioskPayment } from "./use-kiosk-payment";
 
 function ClearIcon() {
@@ -118,10 +119,23 @@ function monthlyText(m: KioskMonthlyInfo): string {
   }
 }
 
+/** HH:mm */
+const hhmm = (iso: string | null) => (iso ? formatDateTime(iso).slice(11, 16) : "");
+
 function describeFinish(s: KioskPaymentSession): Finish {
-  // 有效的月租車不用付錢，開始收款就直接結束
-  if (s.outcome === "paid" && s.target.kind === "entry" && s.target.monthly?.status === "valid") {
-    return { text: "月租車，無須繳費", detail: `月租到期日：${ymd(s.target.monthly.endDate)}`, delay: 5000 };
+  // 不用付錢（月租車、緩衝時間內、已達收費上限），開始收款就直接結束
+  if (s.outcome === "paid" && s.target.kind === "entry" && s.due === 0) {
+    const { monthly, charge } = s.target;
+    switch (charge.status) {
+      case "monthly":
+        return { text: "月租車，無須繳費", detail: monthly ? `月租到期日：${ymd(monthly.endDate)}` : null, delay: 5000 };
+      case "entryBuffer":
+        return { text: "進場緩衝時間內，無須繳費", detail: null, delay: 5000 };
+      case "exitBuffer":
+        return { text: "已繳費，無須補繳", detail: `請於 ${hhmm(charge.exitDeadline)} 前離場`, delay: 5000 };
+      case "capped":
+        return { text: "已達收費上限，無須補繳", detail: `已結帳 ${charge.paid} 元`, delay: 5000 };
+    }
   }
   const kind = s.outcome === "paid" ? "找零" : "退幣";
   const detail = s.returned > 0 ? `${kind}：${coinsText(s.coins, "dispensed")}` : null;
@@ -135,7 +149,13 @@ function describeFinish(s: KioskPaymentSession): Finish {
     };
   }
   if (s.outcome === "paid") {
-    return { text: `繳費完成${s.toReturn > 0 ? `，找零 ${s.returned} 元` : ""}，謝謝光臨`, detail, delay: 5000 };
+    // 電子發票沒設定時提醒客人找管理人員拿收據
+    const noInvoice = s.invoice?.status === "unavailable" ? "本次未開立電子發票，請洽管理人員" : null;
+    return {
+      text: `繳費完成${s.toReturn > 0 ? `，找零 ${s.returned} 元` : ""}，謝謝光臨`,
+      detail: [detail, noInvoice].filter(Boolean).join("　") || null,
+      delay: noInvoice ? 8000 : 5000,
+    };
   }
   const prefix = s.outcome === "timeout" ? "逾時未繳費" : "已取消";
   return s.paid > 0
@@ -385,13 +405,15 @@ function AdPlayer() {
 }
 
 // 各支付方式按鈕的顏色；目前只有現金接上收款設備，其他按下時提示尚未開放
+// 繳費機放在戶外，白天陽光直射時深色畫面會反光看不清楚：底色用白色，按鈕用飽和的深色配白字（或亮色配黑字），
+// 文字對比都在 7:1 以上，再加粗黑框讓按鈕邊界清楚
 const METHOD_STYLES: Record<PaymentMethod, { className: string; available: boolean }> = {
-  cash: { className: "bg-amber-400 text-zinc-900", available: true },
-  card: { className: "bg-sky-600 text-white", available: false },
-  applePay: { className: "bg-zinc-900 text-white ring-1 ring-zinc-500", available: false },
-  linePay: { className: "bg-green-500 text-white", available: false },
-  googlePay: { className: "bg-white text-zinc-800", available: false },
-  samsungPay: { className: "bg-blue-800 text-white", available: false },
+  cash: { className: "bg-amber-400 text-black", available: true },
+  card: { className: "bg-cyan-800 text-white", available: false },
+  applePay: { className: "bg-black text-white", available: false },
+  linePay: { className: "bg-green-800 text-white", available: false },
+  googlePay: { className: "bg-white text-black", available: false },
+  samsungPay: { className: "bg-blue-900 text-white", available: false },
 };
 
 /** 繳費畫面下方的支付方式按鈕（蓋在廣告區上方），只顯示費率設定裡啟用的 */
@@ -411,10 +433,10 @@ function PaymentMethodBar({
   const methods = PAYMENT_METHODS.filter((m) => enabled.includes(m.id));
   if (methods.length === 0) return null;
   return (
-    <div className="absolute inset-x-0 top-0 z-10 space-y-[1vh] bg-zinc-900/95 px-[2vw] py-[1.5vh]">
-      <p className="text-[clamp(1rem,2.6vh,1.6rem)] font-bold text-amber-300">
+    <div className="absolute inset-x-0 top-0 z-10 space-y-[1vh] border-b-4 border-black bg-white px-[2vw] py-[1.5vh]">
+      <p className="text-[clamp(1rem,2.8vh,1.8rem)] font-black text-black">
         請選擇支付方式
-        {notice && <span className="ml-[2vw] text-red-400">{notice}</span>}
+        {notice && <span className="ml-[2vw] rounded bg-red-700 px-[1vw] text-white">{notice}</span>}
       </p>
       <div className={`grid gap-[1vw] ${methods.length >= 3 ? "grid-cols-3" : methods.length === 2 ? "grid-cols-2" : "grid-cols-1"}`}>
         {methods.map((m) => (
@@ -423,12 +445,11 @@ function PaymentMethodBar({
             type="button"
             onClick={() => onSelect(m.id)}
             disabled={disabled}
-            className={`h-[min(9vh,5rem)] rounded-lg text-[clamp(1rem,3.2vh,2rem)] font-bold disabled:opacity-50 ${
+            className={`h-[min(9vh,5rem)] rounded-lg border-[3px] border-black text-[clamp(1.1rem,3.6vh,2.2rem)] font-black tracking-wide shadow-[0_4px_0_#000] active:translate-y-[3px] active:shadow-none disabled:opacity-50 ${
               METHOD_STYLES[m.id].className
-            } ${method === m.id ? "outline outline-4 outline-offset-2 outline-amber-300" : ""} ${
-              METHOD_STYLES[m.id].available ? "" : "opacity-80"
-            }`}
+            } ${method === m.id ? "outline outline-[5px] outline-offset-[3px] outline-red-600" : ""}`}
           >
+            {method === m.id && "✔ "}
             {m.label}
           </button>
         ))}
@@ -452,6 +473,7 @@ function FeeDetail({
   const { session } = payment;
   const minutes = session?.target.kind === "entry" ? session.target.minutes : null;
   const monthly = session?.target.kind === "entry" ? session.target.monthly : null;
+  const charge = session?.target.kind === "entry" ? session.target.charge : null;
   const infoLabelClass = "whitespace-nowrap text-right font-bold text-green-800";
 
   return (
@@ -484,6 +506,15 @@ function FeeDetail({
                 <span className={infoLabelClass}>月　　租：</span>
                 <span className={monthly.status === "valid" ? "font-bold text-green-800" : "font-bold text-red-700"}>
                   {monthlyText(monthly)}
+                </span>
+              </>
+            )}
+            {charge && charge.paid > 0 && (
+              <>
+                <span className={infoLabelClass}>已 結 帳：</span>
+                <span className="text-zinc-900">
+                  {charge.paid}元（{hhmm(charge.payTime)}）
+                  {charge.status === "due" && <span className="font-bold text-red-700"> 超過離場緩衝，需補繳</span>}
                 </span>
               </>
             )}
@@ -612,11 +643,15 @@ export default function ParkingPaymentKioskPage() {
     setPlate("");
   }, [resetPayment]);
 
+  // 繳費完成要開發票時，由發票畫面決定什麼時候回首頁
+  const invoice = payment.session?.status === "done" ? payment.session.invoice : null;
+  const invoiceActive = invoice !== null && invoice.status !== "unavailable";
+
   useEffect(() => {
-    if (!finish) return;
+    if (!finish || invoiceActive) return;
     const timer = setTimeout(closeResult, finish.delay);
     return () => clearTimeout(timer);
-  }, [finish, closeResult]);
+  }, [finish, invoiceActive, closeResult]);
 
   // 取消：收款中就請伺服器依已繳金額退幣（結束後由 onDone 顯示結果再回輸入車號頁面）；
   // 還沒開始收款（計算中或出錯）直接回輸入車號頁面
@@ -830,6 +865,18 @@ export default function ParkingPaymentKioskPage() {
         )}
         <AdPlayer />
       </div>
+
+      {/* 繳費完成：選擇發票開立方式（蓋滿整個畫面） */}
+      {finish && invoiceActive && invoice && payment.session && (
+        <InvoiceStep
+          invoice={invoice}
+          amount={payment.session.due}
+          paidText={finish.text}
+          sellerName={lotName || DEFAULT_TITLE}
+          onChoose={payment.chooseInvoice}
+          onClose={closeResult}
+        />
+      )}
     </div>
   );
 }
